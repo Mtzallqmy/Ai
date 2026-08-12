@@ -1,0 +1,7 @@
+/gradle-8.5/
+/gradle-8.5-bin.zip
+.gradle/
+build/
+.idea/
+*.iml
+.DS_Store
