@@ -94,7 +94,7 @@ class ToolRuntimeApprovalTest {
     private fun registered(tool: CountingTool) =
         RegisteredTool.typed(tool, kotlinx.serialization.json.JsonObject.serializer())
 
-    private class CountingTool : AgentTool<Any, Any> {
+    private class CountingTool : AgentTool<kotlinx.serialization.json.JsonObject, Any> {
         var executionCount = 0
 
         override val descriptor = ToolDescriptor(
@@ -108,7 +108,7 @@ class ToolRuntimeApprovalTest {
 
         override suspend fun availability(context: ToolContext): ToolAvailability = ToolAvailability.Available
 
-        override suspend fun execute(input: Any, context: ToolContext): Any {
+        override suspend fun execute(input: kotlinx.serialization.json.JsonObject, context: ToolContext): Any {
             executionCount += 1
             return "ok"
         }

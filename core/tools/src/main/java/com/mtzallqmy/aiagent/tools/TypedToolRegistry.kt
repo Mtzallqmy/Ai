@@ -34,7 +34,6 @@ class RegisteredTool private constructor(
         private val STRICT_JSON = Json {
             ignoreUnknownKeys = false
             isLenient = false
-            explicitNulls = false
         }
     }
 }
