@@ -39,6 +39,9 @@ include(":core:capabilities")
 include(":core:memory")
 include(":core:workspace")
 
+// Native security runtime
+include(":native:runtime-rust")
+
 // Feature modules
 include(":feature:chat")
 include(":feature:providers")
