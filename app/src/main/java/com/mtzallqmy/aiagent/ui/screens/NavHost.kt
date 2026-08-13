@@ -14,9 +14,9 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -25,7 +25,6 @@ import com.mtzallqmy.aiagent.R
 import com.mtzallqmy.aiagent.ui.components.ChatScreen
 import com.mtzallqmy.aiagent.ui.components.LogsScreen
 import com.mtzallqmy.aiagent.ui.components.ProvidersScreen
-import com.mtzallqmy.aiagent.ui.components.SecurityCenterScreen
 import com.mtzallqmy.aiagent.ui.components.SettingsScreen
 import com.mtzallqmy.aiagent.ui.components.ToolsScreen
 
@@ -50,7 +49,6 @@ fun AegisNavHost() {
     val settings = app?.settings
     val vault = app?.vault
     val tools = app?.toolRegistry?.list().orEmpty()
-    val contentModifier = Modifier.padding
 
     Scaffold(
         bottomBar = {
@@ -75,7 +73,8 @@ fun AegisNavHost() {
                 ?: Text("Local model provider unavailable", modifier = modifier)
             4 -> runtime?.let { AgentRunScreen(it, modifier) }
                 ?: Text("Agent runtime unavailable", modifier = modifier)
-            5 -> SecurityCenterScreen(modifier = modifier)
+            5 -> app?.let { SecurityCenterFeatureScreen(it, modifier) }
+                ?: Text("Security state unavailable", modifier = modifier)
             6 -> SettingsScreen(settings = settings, vault = vault, modifier = modifier)
             7 -> LogsScreen(modifier = modifier)
         }
