@@ -1,33 +1,46 @@
 package com.mtzallqmy.aiagent.tool.terminal
 
 import com.mtzallqmy.aiagent.model.CapabilityId
-import com.mtzallqmy.aiagent.model.*
+import com.mtzallqmy.aiagent.model.RiskLevel
+import com.mtzallqmy.aiagent.model.ToolDescriptor
 import com.mtzallqmy.aiagent.tools.AgentTool
 import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
+
+fun interface TerminalCommandExecutor {
+    suspend fun execute(
+        argv: List<String>,
+        timeoutMs: Long,
+        maxOutputBytes: Int,
+    ): TerminalToolSet.TerminalResult
+}
 
 /**
- * Real shell execution using ProcessBuilder: sessions created, command executed,
- * output read, process destroyed on timeout/cancellation. Never fake execution.
+ * Terminal policy and tool surface. Process creation is delegated to an injected
+ * executor so the Android app process never needs to spawn a shell itself.
  */
 class TerminalToolSet(
+    private val commandExecutor: TerminalCommandExecutor = TerminalCommandExecutor { _, _, _ ->
+        TerminalResult(
+            exitCode = -1,
+            stdout = "",
+            stderr = "Isolated terminal backend is not configured",
+        )
+    },
     private val allowedCommands: Set<String> = DEFAULT_ALLOWED,
     private val maxSessions: Int = 4,
     private val defaultTimeoutMs: Long = 60_000L,
 ) {
-    private val sessions = ConcurrentHashMap<String, Process>()
+    private val sessions = ConcurrentHashMap.newKeySet<String>()
 
     val tools: List<RegisteredTool> = listOf(
         RegisteredTool.typed(TerminalCreateTool(), TerminalCreateInput.serializer()),
@@ -35,59 +48,29 @@ class TerminalToolSet(
         RegisteredTool.typed(TerminalKillTool(), TerminalKillInput.serializer()),
     )
 
-    /** Execute a single command and stream up to maxOutputChars. */
-    fun executeCommand(
+    suspend fun executeCommand(
         command: String,
         timeoutMs: Long = defaultTimeoutMs,
         maxOutputChars: Int = 12_000,
     ): TerminalResult {
-        val args = tokenize(command)
-        if (args.isEmpty()) return TerminalResult(exitCode = -1, stdout = "", stderr = "empty command")
-        val base = args.first()
-        if (allowedCommands.isNotEmpty() && base !in allowedCommands && base != "sh") {
-            return TerminalResult(exitCode = -1, stdout = "", stderr = "Command not allowed: $base")
+        val argv = runCatching { tokenize(command) }.getOrElse { error ->
+            return TerminalResult(-1, "", error.message ?: "Invalid command")
         }
-        val process = try {
-            ProcessBuilder(args).redirectErrorStream(false).start()
-        } catch (e: SecurityException) {
-            return TerminalResult(exitCode = -1, stdout = "", stderr = e.message ?: "Command blocked")
+        if (argv.isEmpty()) return TerminalResult(-1, "", "empty command")
+        val base = argv.first()
+        if (base !in allowedCommands) {
+            return TerminalResult(-1, "", "Command not allowed: $base")
         }
-        return try {
-            readProcess(process, timeoutMs, maxOutputChars)
-        } finally {
-            process.destroyForcibly()
-        }
-    }
-
-    private fun readProcess(process: Process, timeoutMs: Long, maxOutputChars: Int): TerminalResult {
-        val stdoutReader = BufferedReader(InputStreamReader(process.inputStream, Charsets.UTF_8))
-        val stderrReader = BufferedReader(InputStreamReader(process.errorStream, Charsets.UTF_8))
-        val stdout = StringBuilder()
-        val stderr = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeoutMs
-        var outDone = false
-        var errDone = false
-        while (System.currentTimeMillis() < deadline && !(outDone && errDone)) {
-            val ch = stdoutReader.ready()
-            if (ch) {
-                val c = stdoutReader.read()
-                if (c == -1) outDone = true else if (stdout.length < maxOutputChars) stdout.append(c.toChar())
-            }
-            val eh = stderrReader.ready()
-            if (eh) {
-                val c = stderrReader.read()
-                if (c == -1) errDone = true else if (stderr.length < maxOutputChars) stderr.append(c.toChar())
-            }
-            if (!ch && !eh) {
-                try { Thread.sleep(50) } catch (_: InterruptedException) { break }
-            }
-        }
-        val exit = try { process.exitValue() } catch (e: IllegalThreadStateException) { -1 }
-        if (exit == -1) process.destroyForcibly()
-        return TerminalResult(exitCode = exit, stdout = stdout.toString(), stderr = stderr.toString())
+        val timeout = timeoutMs.coerceIn(1L, MAX_TIMEOUT_MS)
+        val outputLimit = maxOutputChars.coerceIn(1, MAX_OUTPUT_BYTES)
+        return commandExecutor.execute(argv, timeout, outputLimit)
     }
 
     private fun tokenize(command: String): List<String> {
+        require(command.length <= MAX_COMMAND_CHARS) { "Command is too long" }
+        require('\u0000' !in command && '\n' !in command && '\r' !in command) {
+            "Command contains forbidden control characters"
+        }
         val tokens = mutableListOf<String>()
         val current = StringBuilder()
         var quote: Char? = null
@@ -97,85 +80,111 @@ class TerminalToolSet(
                 quote != null -> current.append(ch)
                 ch == '"' || ch == '\'' -> quote = ch
                 ch == ' ' || ch == '\t' -> {
-                    if (current.isNotEmpty()) { tokens.add(current.toString()); current.clear() }
+                    if (current.isNotEmpty()) {
+                        tokens += current.toString()
+                        current.clear()
+                    }
                 }
                 else -> current.append(ch)
             }
         }
-        if (current.isNotEmpty()) tokens.add(current.toString())
+        require(quote == null) { "Command contains an unterminated quote" }
+        if (current.isNotEmpty()) tokens += current.toString()
+        require(tokens.size <= MAX_ARGUMENTS) { "Command has too many arguments" }
+        require(tokens.all { it.length <= MAX_ARGUMENT_CHARS }) { "Command argument is too long" }
         return tokens
     }
 
-    fun activeSessions(): Set<String> = sessions.keys.toSet()
+    fun activeSessions(): Set<String> = sessions.toSet()
 
-    fun killSession(sessionId: String): Boolean {
-        val process = sessions.remove(sessionId) ?: return false
-        process.destroyForcibly()
-        return true
-    }
+    fun killSession(sessionId: String): Boolean = sessions.remove(sessionId)
 
-    data class TerminalResult(val exitCode: Int, val stdout: String, val stderr: String)
+    data class TerminalResult(
+        val exitCode: Int,
+        val stdout: String,
+        val stderr: String,
+    )
 
     companion object {
-        /** Default allowed shell commands — explicit, auditable list. */
+        const val MAX_TIMEOUT_MS = 120_000L
+        const val MAX_OUTPUT_BYTES = 256 * 1024
+        const val MAX_COMMAND_CHARS = 16 * 1024
+        const val MAX_ARGUMENTS = 64
+        const val MAX_ARGUMENT_CHARS = 4 * 1024
+
+        /** Conservative toybox-compatible applets. Shell execution is intentionally absent. */
         val DEFAULT_ALLOWED = setOf(
             "ls", "cat", "head", "tail", "wc", "grep", "find", "which", "whoami",
             "pwd", "date", "sleep", "echo", "mkdir", "touch", "cp", "mv", "rm",
-            "chmod", "du", "df", "stat", "uname", "getprop", "pm", "dumpsys",
-            "sh", "id", "env", "free", "uptime",
+            "chmod", "du", "df", "stat", "uname", "id", "env", "uptime",
         )
     }
 
     private inner class TerminalCreateTool : AgentTool<TerminalCreateInput, JsonObject> {
         override val descriptor = ToolDescriptor(
-            id = "terminal.create", displayName = "Create Session", description = "Create a new shell session",
-            inputSchema = """{"type":"object","properties":{}}""", outputSchema = """{"type":"object"}""",
-            riskLevel = RiskLevel.MODIFY, requiredCapabilities = setOf(CapabilityId("terminal")), timeoutMs = 10_000L,
+            id = "terminal.create",
+            displayName = "Create Session",
+            description = "Create a logical isolated-terminal session",
+            inputSchema = """{"type":"object","properties":{}}""",
+            outputSchema = """{"type":"object"}""",
+            riskLevel = RiskLevel.MODIFY,
+            requiredCapabilities = setOf(CapabilityId("terminal")),
+            timeoutMs = 10_000L,
         )
+
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
+
         override suspend fun execute(input: TerminalCreateInput, context: ToolContext): JsonObject {
             if (sessions.size >= maxSessions) error("Maximum sessions reached ($maxSessions)")
             val id = UUID.randomUUID().toString().take(8)
-            val process = ProcessBuilder("sh").redirectErrorStream(false).start()
-            sessions[id] = process
-            return buildJsonObject { put("sessionId", kotlinx.serialization.json.JsonPrimitive(id)) }
+            sessions += id
+            return buildJsonObject { put("sessionId", JsonPrimitive(id)) }
         }
     }
 
     private inner class TerminalExecTool : AgentTool<TerminalExecInput, JsonObject> {
         override val descriptor = ToolDescriptor(
-            id = "terminal.exec", displayName = "Execute Command", description = "Execute a command and return output",
+            id = "terminal.exec",
+            displayName = "Execute Command",
+            description = "Execute an allow-listed command in the isolated Rust runtime",
             inputSchema = """{"type":"object","required":["command"],"properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}}}""",
             outputSchema = """{"type":"object"}""",
-            riskLevel = RiskLevel.MODIFY, requiredCapabilities = setOf(CapabilityId("terminal")), timeoutMs = 120_000L,
+            riskLevel = RiskLevel.MODIFY,
+            requiredCapabilities = setOf(CapabilityId("terminal")),
+            timeoutMs = MAX_TIMEOUT_MS,
         )
+
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
-        override suspend fun execute(input: TerminalExecInput, context: ToolContext): JsonObject = withContext(Dispatchers.IO) {
+
+        override suspend fun execute(input: TerminalExecInput, context: ToolContext): JsonObject {
             val timeout = (input.timeoutMs ?: defaultTimeoutMs).coerceIn(1L, descriptor.timeoutMs)
-            withTimeout(timeout) {
-                val result = executeCommand(input.command, timeout)
-                buildJsonObject {
-                    put("exit_code", kotlinx.serialization.json.JsonPrimitive(result.exitCode))
-                    put("stdout", kotlinx.serialization.json.JsonPrimitive(result.stdout))
-                    put("stderr", kotlinx.serialization.json.JsonPrimitive(result.stderr))
-                }
+            val result = withTimeout(timeout + 1_000L) {
+                executeCommand(input.command, timeout)
+            }
+            return buildJsonObject {
+                put("exit_code", JsonPrimitive(result.exitCode))
+                put("stdout", JsonPrimitive(result.stdout))
+                put("stderr", JsonPrimitive(result.stderr))
             }
         }
     }
 
     private inner class TerminalKillTool : AgentTool<TerminalKillInput, JsonObject> {
         override val descriptor = ToolDescriptor(
-            id = "terminal.kill", displayName = "Kill Session", description = "Kill a shell session",
+            id = "terminal.kill",
+            displayName = "Kill Session",
+            description = "Close a logical isolated-terminal session",
             inputSchema = """{"type":"object","required":["sessionId"],"properties":{"sessionId":{"type":"string"}}}""",
             outputSchema = """{"type":"object"}""",
-            riskLevel = RiskLevel.MODIFY, requiredCapabilities = setOf(CapabilityId("terminal")), timeoutMs = 10_000L,
+            riskLevel = RiskLevel.MODIFY,
+            requiredCapabilities = setOf(CapabilityId("terminal")),
+            timeoutMs = 10_000L,
         )
+
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
-        override suspend fun execute(input: TerminalKillInput, context: ToolContext): JsonObject {
-            return buildJsonObject {
-                put("killed", kotlinx.serialization.json.JsonPrimitive(killSession(input.sessionId)))
-            }
-        }
+
+        override suspend fun execute(input: TerminalKillInput, context: ToolContext): JsonObject =
+            buildJsonObject { put("killed", JsonPrimitive(killSession(input.sessionId))) }
     }
 }
 
