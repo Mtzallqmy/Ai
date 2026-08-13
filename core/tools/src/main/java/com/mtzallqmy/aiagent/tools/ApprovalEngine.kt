@@ -10,8 +10,8 @@ import kotlinx.coroutines.channels.Channel
 
 /** Single human-approval coordinator with stable, persisted matching rules. */
 class ApprovalEngine(
-    private val policyProvider: (RiskLevel) -> ApprovalPolicy = { ApprovalPolicy.ASK_EVERY_TIME },
     private val ruleStore: ApprovalRuleStore = InMemoryApprovalRuleStore(),
+    private val policyProvider: (RiskLevel) -> ApprovalPolicy = { ApprovalPolicy.ASK_EVERY_TIME },
 ) {
     private data class PendingApproval(
         val request: ApprovalRequest,
