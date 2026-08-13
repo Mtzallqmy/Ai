@@ -32,7 +32,9 @@ dependencies {
     implementation(project(":core:capabilities"))
     implementation(project(":core:model"))
     implementation(project(":core:network"))
+    implementation(project(":core:security"))
     implementation(project(":core:tools"))
+    testImplementation(libs.kotlinx.coroutines.test)
 
 android {
     publishing {

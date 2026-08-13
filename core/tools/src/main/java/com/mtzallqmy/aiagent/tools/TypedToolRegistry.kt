@@ -58,6 +58,9 @@ class TypedToolRegistry {
     fun get(toolId: String): RegisteredTool? = tools[toolId]
 
     @Synchronized
+    fun unregister(toolId: String): RegisteredTool? = tools.remove(toolId)
+
+    @Synchronized
     fun list(): List<RegisteredTool> = tools.values.toList()
 
     @Synchronized
