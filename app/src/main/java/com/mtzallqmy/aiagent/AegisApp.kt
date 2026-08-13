@@ -177,7 +177,7 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         providerRegistry.register(smartRouter)
 
         contextManager = ContextManager()
-        memoryStore = MemoryStore { databaseProvider.get(this) }
+        memoryStore = MemoryStore(database = { databaseProvider.get(this) })
         workspaceManager = WorkspaceManager(this)
         skillRegistry = SkillRegistry()
         sandboxBackendRegistry = SandboxBackendRegistry(
