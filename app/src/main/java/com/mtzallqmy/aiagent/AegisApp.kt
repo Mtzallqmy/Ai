@@ -45,6 +45,9 @@ import com.mtzallqmy.aiagent.schedules.ScheduleRuntimeOwner
 import com.mtzallqmy.aiagent.tool.clipboard.ClipboardToolSet
 import com.mtzallqmy.aiagent.tool.filesystem.FileToolSet
 import com.mtzallqmy.aiagent.tool.http.HttpToolSet
+import com.mtzallqmy.aiagent.tool.mcp.McpClient
+import com.mtzallqmy.aiagent.tool.mcp.McpRuntime
+import com.mtzallqmy.aiagent.tool.mcp.StreamableHttpMcpTransport
 import com.mtzallqmy.aiagent.tool.ssh.SshToolSet
 import com.mtzallqmy.aiagent.tool.terminal.TerminalToolSet
 import com.mtzallqmy.aiagent.tools.ApprovalEngine
@@ -81,6 +84,8 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
     lateinit var toolRuntime: ToolRuntime
         private set
     lateinit var toolRegistry: TypedToolRegistry
+        private set
+    lateinit var mcpRuntime: McpRuntime
         private set
     lateinit var providerRegistry: ProviderRegistry
         private set
@@ -198,6 +203,14 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
                     TerminalToolSet().tools +
                     SshToolSet().tools
                 ).forEach(::register)
+        }
+        mcpRuntime = McpRuntime(toolRegistry) { configuration, authentication ->
+            McpClient(
+                StreamableHttpMcpTransport(
+                    endpoint = configuration.endpoint,
+                    authentication = authentication,
+                ),
+            )
         }
         subAgentRunner = SubAgentRunner(
             providers = providerRegistry,
