@@ -78,6 +78,7 @@ dependencies {
     implementation(project(":core:capabilities"))
     implementation(project(":core:memory"))
     implementation(project(":core:workspace"))
+    implementation(project(":core:sandbox"))
     implementation(project(":native:runtime-rust"))
     implementation(project(":feature:chat"))
     implementation(project(":feature:providers"))
