@@ -3,14 +3,13 @@ package com.mtzallqmy.aiagent.feature.browser
 import android.net.Uri
 import com.mtzallqmy.aiagent.model.CapabilityId
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -20,10 +19,18 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+import java.net.InetAddress
 import java.util.UUID
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 interface BrowserUseTransport {
     suspend fun isConfigured(): Boolean
@@ -160,23 +167,29 @@ class BrowserUseRemote(
         require(task.isNotBlank() && task.length <= MAX_TASK_CHARS) { "Invalid browser task" }
         var created: RemoteBrowserJob? = null
         try {
-            created = transport.create(task, sessionId)
-            activeRunId = created.id
-            sessionId = created.sessionId ?: sessionId
-            val deadline = System.currentTimeMillis() + timeoutMs
-            var status = created.status
-            while (status !in TERMINAL_STATUSES && System.currentTimeMillis() < deadline) {
-                delay(pollIntervalMs)
-                status = transport.status(created.id)
+            val completed = withTimeoutOrNull(timeoutMs) {
+                created = transport.create(task, sessionId)
+                val submitted = requireNotNull(created)
+                activeRunId = submitted.id
+                sessionId = submitted.sessionId ?: sessionId
+                var status = submitted.status
+                while (status !in TERMINAL_STATUSES) {
+                    delay(pollIntervalMs)
+                    status = transport.status(submitted.id)
+                }
+                transport.result(submitted.id)
             }
-            val completed = if (status in TERMINAL_STATUSES) {
-                transport.result(created.id)
-            } else {
-                transport.cancel(created.id)
-                created.copy(status = RemoteBrowserJobStatus.TIMED_OUT, error = "Remote browser timeout")
+            if (completed != null) {
+                updateFrom(completed)
+                return completed
             }
-            updateFrom(completed)
-            return completed
+            val timedOut = requireNotNull(created).copy(
+                status = RemoteBrowserJobStatus.TIMED_OUT,
+                error = "Remote browser timeout",
+            )
+            withContext(NonCancellable) { transport.cancel(timedOut.id) }
+            updateFrom(timedOut)
+            return timedOut
         } catch (cancelled: CancellationException) {
             created?.id?.let { runId ->
                 withContext(NonCancellable) { runCatching { transport.cancel(runId) } }
@@ -251,9 +264,14 @@ class BrowserUseRemote(
 class HttpBrowserUseTransport(
     private val apiKeyProvider: suspend () -> String?,
     private val baseUrlProvider: suspend () -> String?,
-    private val httpClient: OkHttpClient,
+    httpClient: OkHttpClient,
 ) : BrowserUseTransport {
     private val json = Json { ignoreUnknownKeys = true }
+    private val httpClient = httpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .dns(PublicDns)
+        .build()
 
     override suspend fun isConfigured(): Boolean = configuration() != null
 
@@ -301,7 +319,7 @@ class HttpBrowserUseTransport(
             config,
             Request.Builder().url("${config.apiRoot}/runs/$runId/events?limit=200&after=0").get().build(),
         )
-        val media = eventsBody?.let(::extractEventMedia).orEmpty()
+        val media = eventsBody?.let(::extractEventMedia) ?: (emptyList<String>() to emptyList())
         return RemoteBrowserJob(
             id = runId,
             sessionId = summary.string("sessionId"),
@@ -323,20 +341,35 @@ class HttpBrowserUseTransport(
         ) != null
     }
 
-    private suspend fun request(config: Configuration, request: Request): String? = withContext(Dispatchers.IO) {
+    private suspend fun request(config: Configuration, request: Request): String? = suspendCancellableCoroutine { continuation ->
         val authenticated = request.newBuilder()
             .header("X-Browser-Use-API-Key", config.apiKey)
             .header("Accept", "application/json")
             .build()
-        runCatching {
-            httpClient.newCall(authenticated).execute().use { response ->
-                if (!response.isSuccessful) return@use null
-                val body = response.body ?: return@use ""
-                if (body.contentLength() > MAX_RESPONSE_BYTES) return@use null
-                val bytes = body.source().readByteArray(MAX_RESPONSE_BYTES.toLong() + 1)
-                if (bytes.size > MAX_RESPONSE_BYTES) null else bytes.toString(Charsets.UTF_8)
+        val call = httpClient.newCall(authenticated)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (continuation.isActive) continuation.resumeWith(Result.success(null))
             }
-        }.getOrNull()
+
+            override fun onResponse(call: Call, response: Response) {
+                val value = runCatching {
+                    response.use {
+                        if (!it.isSuccessful) return@use null
+                        val body = it.body ?: return@use ""
+                        if (body.contentLength() > MAX_RESPONSE_BYTES) return@use null
+                        val bytes = body.source().readByteArray(MAX_RESPONSE_BYTES.toLong() + 1)
+                        if (bytes.size > MAX_RESPONSE_BYTES) null else bytes.toString(Charsets.UTF_8)
+                    }
+                }
+                if (!continuation.isActive) return
+                value.fold(
+                    onSuccess = { continuation.resumeWith(Result.success(it)) },
+                    onFailure = { continuation.resumeWithException(it) },
+                )
+            }
+        })
     }
 
     private suspend fun configuration(): Configuration? {
@@ -399,5 +432,22 @@ class HttpBrowserUseTransport(
         const val MAX_RESPONSE_BYTES = 1_048_576
         const val MAX_ERROR_CHARS = 8 * 1024
         const val MAX_MEDIA_ITEMS = 100
+
+        object PublicDns : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                val public = Dns.SYSTEM.lookup(hostname).filterNot(::isForbiddenAddress)
+                if (public.isEmpty()) throw java.net.UnknownHostException("Blocked non-public host")
+                return public
+            }
+
+            private fun isForbiddenAddress(address: InetAddress): Boolean {
+                if (
+                    address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+                    address.isSiteLocalAddress || address.isMulticastAddress
+                ) return true
+                val bytes = address.address
+                return bytes.size == 16 && (bytes[0].toInt() and 0xFE) == 0xFC
+            }
+        }
     }
 }

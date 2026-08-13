@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -50,6 +51,18 @@ class BrowserSecurityTest {
         task.cancel()
         task.join()
 
+        assertTrue(transport.cancelled)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `remote timeout cancels the run and reports timed out`() = runTest {
+        val transport = FakeTransport(terminal = false)
+        val backend = BrowserUseRemote(transport, pollIntervalMs = 1_000L)
+
+        val job = backend.runJob("Observe the page", timeoutMs = 2_500L)
+
+        assertEquals(RemoteBrowserJobStatus.TIMED_OUT, job.status)
         assertTrue(transport.cancelled)
     }
 

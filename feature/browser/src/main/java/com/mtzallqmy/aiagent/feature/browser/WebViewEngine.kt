@@ -18,6 +18,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.net.http.SslError
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -31,6 +32,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.net.URI
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 internal object BrowserUrlPolicy {
     fun isAllowed(url: String, allowHttp: Boolean = false): Boolean = runCatching {
@@ -196,7 +199,7 @@ class WebViewEngine(
 
     private fun requireView(): WebView = webView ?: error("WebView not created")
 
-    suspend fun navigate(url: String): Result<Unit> = runCatching {
+    suspend fun navigate(url: String): Result<Unit> = try {
         require(BrowserUrlPolicy.isAllowed(url, allowHttp)) { "Blocked navigation target" }
         val navigation = withContext(Dispatchers.Main) {
             val view = requireView()
@@ -207,6 +210,16 @@ class WebViewEngine(
             }
         }
         navigation.await()
+        Result.success(Unit)
+    } catch (cancelled: CancellationException) {
+        withContext(Dispatchers.Main) {
+            pendingNavigation?.cancel()
+            pendingNavigation = null
+            webView?.stopLoading()
+        }
+        throw cancelled
+    } catch (error: Throwable) {
+        Result.failure(error)
     }
 
     suspend fun snapshot(): String = withContext(Dispatchers.Main) {
@@ -262,7 +275,13 @@ class WebViewEngine(
             }
             return null
         }
-        return deferred.await()
+        return try {
+            deferred.await()
+        } finally {
+            withContext(Dispatchers.Main) {
+                if (pendingDownload === deferred) pendingDownload = null
+            }
+        }
     }
 
     suspend fun cookies(): List<BrowserCookie> = withContext(Dispatchers.Main) {
@@ -294,7 +313,11 @@ class WebViewEngine(
             cookie.domain?.let { append("; Domain=").append(it) }
             if (cookie.secure) append("; Secure")
             if (cookie.httpOnly) append("; HttpOnly")
-            cookie.expiresAtEpochSeconds?.let { append("; Expires=").append(Instant.ofEpochSecond(it).toString()) }
+            cookie.expiresAtEpochSeconds?.let {
+                append("; Expires=").append(
+                    DateTimeFormatter.RFC_1123_DATE_TIME.format(Instant.ofEpochSecond(it).atZone(ZoneOffset.UTC)),
+                )
+            }
             append("; SameSite=Lax")
         }
         val result = CompletableDeferred<Boolean>()

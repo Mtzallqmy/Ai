@@ -2,8 +2,12 @@ package com.mtzallqmy.aiagent.feature.browser
 
 import android.net.Uri
 import com.mtzallqmy.aiagent.model.CapabilityId
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonElement
 import java.util.UUID
@@ -37,19 +41,32 @@ class EmbeddedWebViewBackend(
 
     override suspend fun isAvailable(): Boolean = runCatching { engineFactory() != null }.getOrDefault(false)
 
-    override suspend fun open(url: String): BrowserTab? = withTimeout(timeoutMs) {
-        val engine = engineFactory() ?: return@withTimeout null
-        engine.create()
-        if (engine.navigate(url).isFailure) {
-            engine.destroy()
-            return@withTimeout null
+    override suspend fun open(url: String): BrowserTab? {
+        val engine = engineFactory() ?: return null
+        return try {
+            withTimeout(timeoutMs) {
+                engine.create()
+                if (engine.navigate(url).isFailure) {
+                    engine.destroy()
+                    return@withTimeout null
+                }
+                val tabId = UUID.randomUUID().toString()
+                lock.withLock {
+                    engines[tabId] = engine
+                    activeTabId = tabId
+                }
+                engine.toTab(tabId, active = true)
+            }
+        } catch (_: TimeoutCancellationException) {
+            withContext(NonCancellable) { runCatching { engine.destroy() } }
+            null
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) { runCatching { engine.destroy() } }
+            throw cancelled
+        } catch (_: Throwable) {
+            withContext(NonCancellable) { runCatching { engine.destroy() } }
+            null
         }
-        val tabId = UUID.randomUUID().toString()
-        lock.withLock {
-            engines[tabId] = engine
-            activeTabId = tabId
-        }
-        engine.toTab(tabId, active = true)
     }
 
     override suspend fun tabs(): List<BrowserTab> {
@@ -68,13 +85,21 @@ class EmbeddedWebViewBackend(
 
     override suspend fun currentState(): BrowserState {
         val (tabId, engine) = activeEngine() ?: return EMPTY_STATE
-        return withTimeout(timeoutMs) {
-            BrowserState(
-                tabId = tabId,
-                url = engine.currentUrl(),
-                title = engine.title(),
-                accessibleTree = engine.snapshot(),
-            )
+        return try {
+            withTimeout(timeoutMs) {
+                BrowserState(
+                    tabId = tabId,
+                    url = engine.currentUrl(),
+                    title = engine.title(),
+                    accessibleTree = engine.snapshot(),
+                )
+            }
+        } catch (_: TimeoutCancellationException) {
+            EMPTY_STATE
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            EMPTY_STATE
         }
     }
 
@@ -111,8 +136,12 @@ class EmbeddedWebViewBackend(
                 if (activeTabId == target) activeTabId = engines.keys.lastOrNull()
             }
         } ?: return false
-        withTimeout(timeoutMs) { engine.destroy() }
-        return true
+        return try {
+            withTimeout(timeoutMs) { engine.destroy() }
+            true
+        } catch (_: TimeoutCancellationException) {
+            false
+        }
     }
 
     override suspend fun verify(expected: BrowserExpectation): BrowserVerification =
@@ -129,7 +158,15 @@ class EmbeddedWebViewBackend(
 
     private suspend fun <T> withEngineValue(fallback: T, block: suspend (WebViewEngine) -> T): T {
         val engine = activeEngine()?.second ?: return fallback
-        return runCatching { withTimeout(timeoutMs) { block(engine) } }.getOrDefault(fallback)
+        return try {
+            withTimeout(timeoutMs) { block(engine) }
+        } catch (_: TimeoutCancellationException) {
+            fallback
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            fallback
+        }
     }
 
     private suspend fun activeEngine(): Pair<String, WebViewEngine>? = lock.withLock {
