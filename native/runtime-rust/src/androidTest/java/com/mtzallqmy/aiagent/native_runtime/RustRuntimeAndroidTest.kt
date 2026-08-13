@@ -49,6 +49,23 @@ class RustRuntimeAndroidTest {
     }
 
     @Test
+    fun binderClientCanReconnectAfterExplicitUnbind() = runBlocking {
+        client.close()
+        val disconnected = runCatching { client.capabilities() }.exceptionOrNull()
+        assertTrue(disconnected is IllegalStateException)
+
+        client.connect()
+        val result = execute(
+            RustExecutionRequest(
+                program = "/system/bin/sh",
+                arguments = listOf("-c", "printf reconnected"),
+            ),
+        )
+        assertEquals("completed", result.status)
+        assertEquals("reconnected", result.stdout)
+    }
+
+    @Test
     fun invalidExecutableIsRejectedBeforeProcessCreation() {
         val start = client.start(RustExecutionRequest(program = "/system/bin/id"))
         assertEquals("error", start.status)
