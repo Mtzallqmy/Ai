@@ -24,7 +24,8 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 }
-    dependencies {
+
+dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
@@ -38,11 +39,5 @@ android {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.squareup.okhttp)
     implementation(libs.squareup.okhttp.logging)
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
+    testImplementation(libs.junit)
 }
