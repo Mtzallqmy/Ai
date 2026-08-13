@@ -26,6 +26,9 @@ import com.mtzallqmy.aiagent.provider.openai.OpenAiProvider
 import com.mtzallqmy.aiagent.provider.openrouter.OpenRouterProvider
 import com.mtzallqmy.aiagent.security.CredentialScope
 import com.mtzallqmy.aiagent.security.CredentialVault
+import com.mtzallqmy.aiagent.sandbox.ProotLinuxBackend
+import com.mtzallqmy.aiagent.sandbox.SandboxBackendRegistry
+import com.mtzallqmy.aiagent.sandbox.termux.AndroidTermuxCommandTransport
 import com.mtzallqmy.aiagent.tool.clipboard.ClipboardToolSet
 import com.mtzallqmy.aiagent.tool.filesystem.FileToolSet
 import com.mtzallqmy.aiagent.tool.http.HttpToolSet
@@ -58,6 +61,8 @@ class AegisApp : Application() {
     lateinit var toolRegistry: TypedToolRegistry
         private set
     lateinit var providerRegistry: ProviderRegistry
+        private set
+    lateinit var sandboxBackendRegistry: SandboxBackendRegistry
         private set
     lateinit var runtime: AgentRuntime
         private set
@@ -119,6 +124,14 @@ class AegisApp : Application() {
         memoryStore = MemoryStore { databaseProvider.get(this) }
         workspaceManager = WorkspaceManager(this)
         skillRegistry = SkillRegistry()
+        sandboxBackendRegistry = SandboxBackendRegistry(
+            listOf(
+                ProotLinuxBackend(
+                    transport = AndroidTermuxCommandTransport(this),
+                    installationOptIn = { settings.getBoolean("proot_backend_enabled") },
+                ),
+            ),
+        )
 
         toolRegistry = TypedToolRegistry().apply {
             (
