@@ -47,8 +47,8 @@ class ModelsTest {
 
     @Test
     fun `approval options are exhaustive`() {
-        assertEquals(4, ApprovalOption.values().size)
-        setOf("ALLOW_ONCE", "ALLOW_FOR_TASK", "ALWAYS_ALLOW", "DENY").forEach { name ->
+        assertEquals(5, ApprovalOption.values().size)
+        setOf("ALLOW_ONCE", "ALLOW_FOR_TASK", "ALWAYS_ALLOW", "DENY", "ASK").forEach { name ->
             assertEquals(name, ApprovalOption.valueOf(name).name)
         }
     }

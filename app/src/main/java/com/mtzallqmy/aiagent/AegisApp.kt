@@ -149,7 +149,6 @@ class AegisApp : Application() {
         runtime = AgentRuntime(
             provider = providerRegistry.select("openai"),
             toolRuntime = toolRuntime,
-            approvalEngine = approvalEngine,
         )
     }
 }
