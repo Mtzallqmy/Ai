@@ -4,19 +4,22 @@ import com.mtzallqmy.aiagent.model.CapabilityId
 import com.mtzallqmy.aiagent.model.RiskLevel
 import com.mtzallqmy.aiagent.model.ToolDescriptor
 import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
 
 /**
  * n8n adapter — concepts studied from n8n (Sustainable Use license;
@@ -33,7 +36,7 @@ class N8nAdapter(
     private val httpClient: OkHttpClient,
 ) {
     /** Webhook trigger tool — fires a workflow synchronously-ish (POST). */
-    val triggerWorkflowTool: AgentTool<JsonElement, JsonElement> = object : AgentTool<JsonElement, JsonElement> {
+    private val triggerWorkflowAgentTool = object : AgentTool<N8nTriggerInput, JsonObject> {
         override val descriptor = ToolDescriptor(
             id = "n8n.trigger_workflow",
             displayName = "Trigger n8n Workflow",
@@ -50,15 +53,13 @@ class N8nAdapter(
             else ToolAvailability.Unavailable("n8n base URL not configured")
         }
 
-        override suspend fun execute(input: JsonElement, context: ToolContext): JsonElement {
-            val args = input.jsonObject
-            val webhookUrl = args["webhookUrl"]?.let { (it as? JsonPrimitive)?.content }
-                ?: error("webhookUrl required")
-            val payload = args["payload"]?.toString() ?: "{}"
+        override suspend fun execute(input: N8nTriggerInput, context: ToolContext): JsonObject {
+            val configuredBase = baseUrlProvider() ?: error("n8n base URL not configured")
+            validateWebhookOrigin(input.webhookUrl, configuredBase)
             return withContext(Dispatchers.IO) {
                 val request = Request.Builder()
-                    .url(webhookUrl)
-                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .url(input.webhookUrl)
+                    .post(input.payload.toString().toRequestBody("application/json".toMediaType()))
                     .build()
                 httpClient.newCall(request).execute().use { response ->
                     val body = response.body?.string() ?: ""
@@ -70,6 +71,23 @@ class N8nAdapter(
             }
         }
     }
+
+    val triggerWorkflowTool: RegisteredTool =
+        RegisteredTool.typed(triggerWorkflowAgentTool, N8nTriggerInput.serializer())
+
+    private fun validateWebhookOrigin(webhookUrl: String, configuredBase: String) {
+        val webhook = URI(webhookUrl)
+        val base = URI(configuredBase)
+        require(!webhook.host.isNullOrBlank() && !base.host.isNullOrBlank()) { "Absolute n8n URLs are required" }
+        require(webhook.scheme in setOf("https", "http")) { "Unsupported n8n webhook scheme" }
+        require(webhook.scheme.equals(base.scheme, ignoreCase = true)) { "Webhook scheme does not match configured n8n origin" }
+        require(webhook.host.equals(base.host, ignoreCase = true)) { "Webhook host does not match configured n8n origin" }
+        val webhookPort = if (webhook.port == -1) defaultPort(webhook.scheme) else webhook.port
+        val basePort = if (base.port == -1) defaultPort(base.scheme) else base.port
+        require(webhookPort == basePort) { "Webhook port does not match configured n8n origin" }
+    }
+
+    private fun defaultPort(scheme: String?): Int = if (scheme.equals("https", ignoreCase = true)) 443 else 80
 
     /** Fetch the latest execution status of a workflow via the n8n API. */
     suspend fun latestExecution(workflowId: String): JsonElement? {
@@ -93,3 +111,9 @@ class N8nAdapter(
     /** Check the adapter is configured. */
     suspend fun isConfigured(): Boolean = baseUrlProvider() != null
 }
+
+@Serializable
+data class N8nTriggerInput(
+    val webhookUrl: String,
+    val payload: JsonObject = JsonObject(emptyMap()),
+)

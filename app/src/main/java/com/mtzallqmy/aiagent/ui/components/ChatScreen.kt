@@ -18,15 +18,17 @@ import com.mtzallqmy.aiagent.agent.AgentRuntime
 import com.mtzallqmy.aiagent.feature.chat.ChatViewModel
 import com.mtzallqmy.aiagent.model.AgentState
 import com.mtzallqmy.aiagent.model.MessageRole
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     runtime: AgentRuntime?,
     providers: ProviderRegistry?,
+    tools: List<RegisteredTool>,
     modifier: Modifier = Modifier,
 ) {
-    val viewModel = remember(runtime) { runtime?.let { ChatViewModel(it) } }
+    val viewModel = remember(runtime, tools) { runtime?.let { ChatViewModel(it, tools) } }
     val messages by (viewModel?.messages?.collectAsState() ?: mutableStateOf(emptyList()))
     val state by (viewModel?.state?.collectAsState() ?: mutableStateOf(AgentState.IDLE))
 
@@ -78,7 +80,7 @@ fun ChatScreen(
             IconButton(onClick = {
                 val text = input.trim()
                 if (text.isNotEmpty()) {
-                    viewModel?.send(text, tools = emptyList())
+                    viewModel?.send(text)
                     input = ""
                 }
             }) {

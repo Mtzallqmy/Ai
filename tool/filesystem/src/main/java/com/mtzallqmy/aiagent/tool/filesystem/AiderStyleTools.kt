@@ -4,15 +4,15 @@ import com.mtzallqmy.aiagent.model.CapabilityId
 import com.mtzallqmy.aiagent.model.RiskLevel
 import com.mtzallqmy.aiagent.model.ToolDescriptor
 import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 /**
@@ -25,7 +25,7 @@ class RepoMapTool(
     private val baseDirProvider: suspend () -> File,
     private val maxFiles: Int = 100,
     private val firstLines: Int = 3,
-) : AgentTool<Any, Any> {
+) : AgentTool<RepoMapInput, JsonObject> {
     override val descriptor = ToolDescriptor(
         id = "filesystem.repo_map",
         displayName = "Repository Map",
@@ -39,11 +39,10 @@ class RepoMapTool(
 
     override suspend fun availability(context: ToolContext) = ToolAvailability.Available
 
-    override suspend fun execute(input: Any, context: ToolContext): Any = withContext(Dispatchers.IO) {
-        val args = (input as? JsonObject) ?: emptyJsonObject()
-        val subdir = args["subdir"]?.jsonPrimitive?.content ?: ""
-        val base = baseDirProvider()
-        val root = if (subdir.isNotBlank()) File(base, subdir) else base
+    override suspend fun execute(input: RepoMapInput, context: ToolContext): JsonObject = withContext(Dispatchers.IO) {
+        val base = baseDirProvider().canonicalFile
+        val root = (if (input.subdir.isNotBlank()) File(base, input.subdir) else base).canonicalFile
+        require(root.toPath().startsWith(base.toPath())) { "Path escapes workspace" }
         require(root.isDirectory) { "Directory not found: $root" }
 
         val files = root.walkTopDown()
@@ -65,7 +64,7 @@ class RepoMapTool(
         }
     }
 
-    private fun emptyJsonObject(): JsonObject = buildJsonObject {}
+    fun registered(): RegisteredTool = RegisteredTool.typed(this, RepoMapInput.serializer())
 }
 
 /**
@@ -74,7 +73,7 @@ class RepoMapTool(
  */
 class FileEditTool(
     private val baseDirProvider: suspend () -> File,
-) : AgentTool<Any, Any> {
+) : AgentTool<FileEditInput, JsonObject> {
     override val descriptor = ToolDescriptor(
         id = "filesystem.edit",
         displayName = "Edit File",
@@ -88,32 +87,33 @@ class FileEditTool(
 
     override suspend fun availability(context: ToolContext) = ToolAvailability.Available
 
-    override suspend fun execute(input: Any, context: ToolContext): Any = withContext(Dispatchers.IO) {
-        val args = (input as? JsonObject) ?: error("arguments object required")
-        val path = args["path"]?.jsonPrimitive?.content ?: error("path required")
-        val operation = args["operation"]?.jsonPrimitive?.content ?: error("operation required")
-        val file = File(baseDirProvider(), path).normalize().also {
-            require(it.absolutePath.startsWith(baseDirProvider().absolutePath)) { "Path escapes workspace" }
+    override suspend fun execute(input: FileEditInput, context: ToolContext): JsonObject = withContext(Dispatchers.IO) {
+        val base = baseDirProvider().canonicalFile
+        val file = File(base, input.path).canonicalFile.also {
+            require(it.toPath().startsWith(base.toPath())) { "Path escapes workspace" }
         }
 
-        when (operation) {
+        when (input.operation) {
             "replace" -> {
-                val find = args["find"]?.jsonPrimitive?.content ?: error("find required")
-                val replacement = args["replace"]?.jsonPrimitive?.content ?: ""
-                require(file.exists()) { "File not found: $path" }
+                val find = input.find ?: error("find required")
+                val replacement = input.replace ?: ""
+                require(file.exists()) { "File not found: ${input.path}" }
                 val content = file.readText()
-                require(find in content) { "Pattern not found in $path" }
+                require(find in content) { "Pattern not found in ${input.path}" }
                 file.writeText(content.replace(find, replacement, ignoreCase = false))
                 buildJsonObject { put("bytes_written", JsonPrimitive(file.length())) }
             }
             "append" -> {
-                val text = args["text"]?.jsonPrimitive?.content ?: ""
+                val text = input.text ?: ""
+                file.parentFile?.mkdirs()
                 file.appendText(text + "\n")
                 buildJsonObject { put("bytes_written", JsonPrimitive(text.length + 1)) }
             }
-            else -> error("Unknown operation: $operation (use replace or append)")
+            else -> error("Unknown operation: ${input.operation} (use replace or append)")
         }
     }
+
+    fun registered(): RegisteredTool = RegisteredTool.typed(this, FileEditInput.serializer())
 }
 
 /**
@@ -122,7 +122,7 @@ class FileEditTool(
  */
 class GitDiffTool(
     private val baseDirProvider: suspend () -> File,
-) : AgentTool<Any, Any> {
+) : AgentTool<GitDiffInput, JsonObject> {
     override val descriptor = ToolDescriptor(
         id = "filesystem.git_diff",
         displayName = "Git Diff",
@@ -136,7 +136,7 @@ class GitDiffTool(
 
     override suspend fun availability(context: ToolContext) = ToolAvailability.Available
 
-    override suspend fun execute(input: Any, context: ToolContext): Any = withContext(Dispatchers.IO) {
+    override suspend fun execute(input: GitDiffInput, context: ToolContext): JsonObject = withContext(Dispatchers.IO) {
         val base = baseDirProvider()
         val diff = runGit(base, "git diff --stat")
         val status = runGit(base, "git status --short")
@@ -151,4 +151,21 @@ class GitDiffTool(
         process.waitFor()
         process.inputStream.bufferedReader().readText().take(10_000)
     }.getOrElse { "git unavailable: ${it.message}" }
+
+    fun registered(): RegisteredTool = RegisteredTool.typed(this, GitDiffInput.serializer())
 }
+
+@Serializable
+data class RepoMapInput(val subdir: String = "")
+
+@Serializable
+data class FileEditInput(
+    val path: String,
+    val operation: String,
+    val find: String? = null,
+    val replace: String? = null,
+    val text: String? = null,
+)
+
+@Serializable
+class GitDiffInput

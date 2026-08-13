@@ -18,6 +18,7 @@ import java.util.UUID
  */
 class ChatViewModel(
     private val runtime: AgentRuntime,
+    private val availableTools: List<RegisteredTool> = emptyList(),
     scope: CoroutineScope = CoroutineScope(Dispatchers.Main),
 ) {
     private val uiScope = scope
@@ -31,7 +32,7 @@ class ChatViewModel(
     private val _timeline = MutableStateFlow<List<RunTimelineEntry>>(emptyList())
     val timeline: StateFlow<List<RunTimelineEntry>> = _timeline
 
-    fun send(text: String, tools: List<RegisteredTool>, modelId: String = "") {
+    fun send(text: String, tools: List<RegisteredTool> = availableTools, modelId: String = "") {
         if (text.isBlank()) return
         _messages.value += ChatMessage(role = MessageRole.USER, content = text)
         _messages.value += ChatMessage(role = MessageRole.ASSISTANT, content = "")
@@ -83,7 +84,7 @@ class ChatViewModel(
         val lastUser = _messages.value.filter { it.role == MessageRole.USER }.lastOrNull() ?: return
         val trimmed = _messages.value.dropLast(2)
         _messages.value = trimmed
-        send(lastUser.content, emptyList())
+        send(lastUser.content)
     }
 
     fun editMessage(index: Int, text: String) {

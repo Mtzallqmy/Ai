@@ -4,12 +4,13 @@ import com.mtzallqmy.aiagent.model.CapabilityId
 import com.mtzallqmy.aiagent.model.*
 import com.mtzallqmy.aiagent.network.SafeHttpClient
 import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
@@ -27,16 +28,21 @@ class HttpToolSet(
 ) {
     private val client = SafeHttpClient.create()
 
-    val tools: List<AgentTool<Any, Any>> = listOf(
-        HttpMethodTool("http.get", "GET"),
-        HttpMethodTool("http.post", "POST"),
-        HttpMethodTool("http.put", "PUT"),
-        HttpMethodTool("http.patch", "PATCH"),
-        HttpMethodTool("http.delete", "DELETE"),
-        HttpMethodTool("http.head", "HEAD"),
-    )
+    val tools: List<RegisteredTool> = listOf(
+        "http.get" to "GET",
+        "http.post" to "POST",
+        "http.put" to "PUT",
+        "http.patch" to "PATCH",
+        "http.delete" to "DELETE",
+        "http.head" to "HEAD",
+    ).map { (id, method) ->
+        RegisteredTool.typed(HttpMethodTool(id, method), HttpRequestInput.serializer())
+    }
 
-    private inner class HttpMethodTool(overrideId: String, private val method: String) : AgentTool<Any, Any> {
+    private inner class HttpMethodTool(
+        overrideId: String,
+        private val method: String,
+    ) : AgentTool<HttpRequestInput, JsonObject> {
         override val descriptor = ToolDescriptor(
             id = overrideId, displayName = method,
             description = "Perform an HTTP $method request against a remote API",
@@ -45,19 +51,15 @@ class HttpToolSet(
             riskLevel = RiskLevel.COMMUNICATION, requiredCapabilities = setOf(CapabilityId("network")), timeoutMs = 30_000L,
         )
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
-        override suspend fun execute(input: Any, context: ToolContext): Any = withContext(Dispatchers.IO) {
-            val args = input as? JsonObject ?: error("arguments object required")
-            val url = args["url"]?.jsonPrimitive?.content ?: error("url required")
-            validateUrl(url)
-            val headers = (args["headers"] as? JsonObject)?.entries?.associate { (k, v) -> k to v.jsonPrimitive.content } ?: emptyMap()
-            val bodyStr = args["body"]?.jsonPrimitive?.content
-            val request = Request.Builder().url(url).apply {
-                headers.forEach { (k, v) -> header(k, v) }
+        override suspend fun execute(input: HttpRequestInput, context: ToolContext): JsonObject = withContext(Dispatchers.IO) {
+            validateUrl(input.url)
+            val request = Request.Builder().url(input.url).apply {
+                input.headers.forEach { (k, v) -> header(k, v) }
                 when (method) {
                     "GET", "HEAD" -> method
-                    "POST" -> post((bodyStr ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    "PUT" -> put((bodyStr ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    "PATCH" -> patch((bodyStr ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    "POST" -> post((input.body ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    "PUT" -> put((input.body ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    "PATCH" -> patch((input.body ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()))
                     "DELETE" -> delete()
                     else -> get()
                 }
@@ -82,3 +84,10 @@ class HttpToolSet(
         if (url.isBlank()) error("Empty URL")
     }
 }
+
+@Serializable
+data class HttpRequestInput(
+    val url: String,
+    val headers: Map<String, String> = emptyMap(),
+    val body: String? = null,
+)

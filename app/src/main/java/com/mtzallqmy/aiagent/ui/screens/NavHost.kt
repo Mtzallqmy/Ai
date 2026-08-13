@@ -47,6 +47,7 @@ fun AegisNavHost() {
     val capabilities = (androidx.compose.ui.platform.LocalContext.current.applicationContext as? com.mtzallqmy.aiagent.AegisApp)?.capabilityRegistry
     val settings = (androidx.compose.ui.platform.LocalContext.current.applicationContext as? com.mtzallqmy.aiagent.AegisApp)?.settings
     val vault = (androidx.compose.ui.platform.LocalContext.current.applicationContext as? com.mtzallqmy.aiagent.AegisApp)?.vault
+    val tools = (androidx.compose.ui.platform.LocalContext.current.applicationContext as? com.mtzallqmy.aiagent.AegisApp)?.toolRegistry?.list().orEmpty()
 
     Scaffold(
         bottomBar = {
@@ -66,6 +67,7 @@ fun AegisNavHost() {
             0 -> ChatScreen(
                 runtime = runtime,
                 providers = providerRegistry,
+                tools = tools,
                 modifier = Modifier.padding(padding),
             )
             1 -> ToolsScreen(

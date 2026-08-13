@@ -3,17 +3,16 @@ package com.mtzallqmy.aiagent.tool.terminal
 import com.mtzallqmy.aiagent.model.CapabilityId
 import com.mtzallqmy.aiagent.model.*
 import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.UUID
@@ -30,10 +29,10 @@ class TerminalToolSet(
 ) {
     private val sessions = ConcurrentHashMap<String, Process>()
 
-    val tools: List<AgentTool<Any, Any>> = listOf(
-        TerminalCreateTool(),
-        TerminalExecTool(),
-        TerminalKillTool(),
+    val tools: List<RegisteredTool> = listOf(
+        RegisteredTool.typed(TerminalCreateTool(), TerminalCreateInput.serializer()),
+        RegisteredTool.typed(TerminalExecTool(), TerminalExecInput.serializer()),
+        RegisteredTool.typed(TerminalKillTool(), TerminalKillInput.serializer()),
     )
 
     /** Execute a single command and stream up to maxOutputChars. */
@@ -127,14 +126,14 @@ class TerminalToolSet(
         )
     }
 
-    private inner class TerminalCreateTool : AgentTool<Any, Any> {
+    private inner class TerminalCreateTool : AgentTool<TerminalCreateInput, JsonObject> {
         override val descriptor = ToolDescriptor(
             id = "terminal.create", displayName = "Create Session", description = "Create a new shell session",
             inputSchema = """{"type":"object","properties":{}}""", outputSchema = """{"type":"object"}""",
             riskLevel = RiskLevel.MODIFY, requiredCapabilities = setOf(CapabilityId("terminal")), timeoutMs = 10_000L,
         )
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
-        override suspend fun execute(input: Any, context: ToolContext): Any {
+        override suspend fun execute(input: TerminalCreateInput, context: ToolContext): JsonObject {
             if (sessions.size >= maxSessions) error("Maximum sessions reached ($maxSessions)")
             val id = UUID.randomUUID().toString().take(8)
             val process = ProcessBuilder("sh").redirectErrorStream(false).start()
@@ -143,20 +142,18 @@ class TerminalToolSet(
         }
     }
 
-    private inner class TerminalExecTool : AgentTool<Any, Any> {
+    private inner class TerminalExecTool : AgentTool<TerminalExecInput, JsonObject> {
         override val descriptor = ToolDescriptor(
             id = "terminal.exec", displayName = "Execute Command", description = "Execute a command and return output",
-            inputSchema = """{"type":"object","required":["command"],"properties":{"command":{"type":"string"}}}""",
+            inputSchema = """{"type":"object","required":["command"],"properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}}}""",
             outputSchema = """{"type":"object"}""",
             riskLevel = RiskLevel.MODIFY, requiredCapabilities = setOf(CapabilityId("terminal")), timeoutMs = 120_000L,
         )
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
-        override suspend fun execute(input: Any, context: ToolContext): Any = withContext(Dispatchers.IO) {
-            val args = input as? JsonObject ?: error("arguments object required")
-            val command = args["command"]?.jsonPrimitive?.content ?: error("command required")
-            val timeout = args["timeout_ms"]?.jsonPrimitive?.content?.toLongOrNull() ?: defaultTimeoutMs
+        override suspend fun execute(input: TerminalExecInput, context: ToolContext): JsonObject = withContext(Dispatchers.IO) {
+            val timeout = (input.timeoutMs ?: defaultTimeoutMs).coerceIn(1L, descriptor.timeoutMs)
             withTimeout(timeout) {
-                val result = executeCommand(command, timeout)
+                val result = executeCommand(input.command, timeout)
                 buildJsonObject {
                     put("exit_code", kotlinx.serialization.json.JsonPrimitive(result.exitCode))
                     put("stdout", kotlinx.serialization.json.JsonPrimitive(result.stdout))
@@ -166,7 +163,7 @@ class TerminalToolSet(
         }
     }
 
-    private inner class TerminalKillTool : AgentTool<Any, Any> {
+    private inner class TerminalKillTool : AgentTool<TerminalKillInput, JsonObject> {
         override val descriptor = ToolDescriptor(
             id = "terminal.kill", displayName = "Kill Session", description = "Kill a shell session",
             inputSchema = """{"type":"object","required":["sessionId"],"properties":{"sessionId":{"type":"string"}}}""",
@@ -174,12 +171,22 @@ class TerminalToolSet(
             riskLevel = RiskLevel.MODIFY, requiredCapabilities = setOf(CapabilityId("terminal")), timeoutMs = 10_000L,
         )
         override suspend fun availability(context: ToolContext) = ToolAvailability.Available
-        override suspend fun execute(input: Any, context: ToolContext): Any {
-            val args = input as? JsonObject ?: error("arguments object required")
-            val sessionId = args["sessionId"]?.jsonPrimitive?.content ?: error("sessionId required")
+        override suspend fun execute(input: TerminalKillInput, context: ToolContext): JsonObject {
             return buildJsonObject {
-                put("killed", kotlinx.serialization.json.JsonPrimitive(killSession(sessionId)))
+                put("killed", kotlinx.serialization.json.JsonPrimitive(killSession(input.sessionId)))
             }
         }
     }
 }
+
+@Serializable
+class TerminalCreateInput
+
+@Serializable
+data class TerminalExecInput(
+    val command: String,
+    @SerialName("timeout_ms") val timeoutMs: Long? = null,
+)
+
+@Serializable
+data class TerminalKillInput(val sessionId: String)

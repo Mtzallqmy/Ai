@@ -30,9 +30,11 @@ import com.mtzallqmy.aiagent.tool.clipboard.ClipboardToolSet
 import com.mtzallqmy.aiagent.tool.filesystem.FileToolSet
 import com.mtzallqmy.aiagent.tool.http.HttpToolSet
 import com.mtzallqmy.aiagent.tool.ssh.SshToolSet
+import com.mtzallqmy.aiagent.tool.terminal.TerminalToolSet
 import com.mtzallqmy.aiagent.tools.ApprovalEngine
 import com.mtzallqmy.aiagent.tools.SharedPreferencesApprovalRuleStore
 import com.mtzallqmy.aiagent.tools.ToolRuntime
+import com.mtzallqmy.aiagent.tools.TypedToolRegistry
 import com.mtzallqmy.aiagent.workspace.WorkspaceManager
 
 /**
@@ -52,6 +54,8 @@ class AegisApp : Application() {
     lateinit var approvalEngine: ApprovalEngine
         private set
     lateinit var toolRuntime: ToolRuntime
+        private set
+    lateinit var toolRegistry: TypedToolRegistry
         private set
     lateinit var providerRegistry: ProviderRegistry
         private set
@@ -115,6 +119,17 @@ class AegisApp : Application() {
         memoryStore = MemoryStore { databaseProvider.get(this) }
         workspaceManager = WorkspaceManager(this)
         skillRegistry = SkillRegistry()
+
+        toolRegistry = TypedToolRegistry().apply {
+            (
+                FileToolSet(this@AegisApp).tools +
+                    HttpToolSet().tools +
+                    ClipboardToolSet(this@AegisApp).tools +
+                    DeviceToolSet(this@AegisApp).tools +
+                    TerminalToolSet().tools +
+                    SshToolSet().tools
+                ).forEach(::register)
+        }
 
         // Phase 5 integrations (studied reference repos, clean-room implementations)
         val vectorStore = InMemoryVectorStore()
