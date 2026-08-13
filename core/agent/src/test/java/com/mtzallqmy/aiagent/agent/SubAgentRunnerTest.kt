@@ -24,9 +24,11 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -92,6 +94,36 @@ class SubAgentRunnerTest {
     }
 
     @Test
+    fun parentCancellationCancelsAllChildren() = runBlocking {
+        val fixture = fixture(provider = BlockingProvider())
+        val first = fixture.runner.start(spec(agentId = "browser-1", toolAllowlist = emptySet()), "Wait")
+        val second = fixture.runner.start(spec(agentId = "browser-2", toolAllowlist = emptySet()), "Wait")
+
+        assertEquals(setOf("browser-1", "browser-2"), fixture.runner.activeChildren("parent-run").toSet())
+        assertEquals(2, fixture.runner.cancelChildren("parent-run"))
+
+        assertEquals(SubAgentStatus.CANCELLED, withTimeout(5_000) { first.await() }.status)
+        assertEquals(SubAgentStatus.CANCELLED, withTimeout(5_000) { second.await() }.status)
+        assertTrue(fixture.runner.activeChildren("parent-run").isEmpty())
+        fixture.close()
+    }
+
+    @Test
+    fun concurrencyLimitRejectsAdditionalChild() = runBlocking {
+        val fixture = fixture(provider = BlockingProvider(), maxConcurrentAgents = 1)
+        val first = fixture.runner.start(spec(agentId = "browser-1", toolAllowlist = emptySet()), "Wait")
+
+        val rejected = runCatching {
+            fixture.runner.start(spec(agentId = "browser-2", toolAllowlist = emptySet()), "Wait too")
+        }
+
+        assertTrue(rejected.exceptionOrNull() is IllegalStateException)
+        first.cancel()
+        withTimeout(5_000) { first.await() }
+        fixture.close()
+    }
+
+    @Test
     fun timeoutIsReportedSeparatelyFromCancellation() = runBlocking {
         val fixture = fixture(provider = BlockingProvider())
         val result = withTimeout(5_000) {
@@ -117,9 +149,35 @@ class SubAgentRunnerTest {
         fixture.close()
     }
 
+    @Test
+    fun childFailureIsContainedAndReported() = runBlocking {
+        val fixture = fixture(provider = FailingProvider())
+        val result = withTimeout(5_000) {
+            fixture.runner.start(spec(toolAllowlist = emptySet()), "Fail in child only").await()
+        }
+
+        assertEquals(SubAgentStatus.FAILED, result.status)
+        assertTrue(result.errors >= 1)
+        fixture.close()
+    }
+
+    @Test
+    fun resultIsHandedOffThroughResultStream() = runBlocking {
+        val fixture = fixture()
+        val emitted = async { withTimeout(5_000) { fixture.runner.results.first() } }
+        val direct = fixture.runner.start(spec(toolAllowlist = emptySet()), "Return a result").await()
+        val handoff = emitted.await()
+
+        assertEquals(direct.runId, handoff.runId)
+        assertEquals(direct.parentRunId, handoff.parentRunId)
+        assertEquals(SubAgentStatus.COMPLETED, handoff.status)
+        fixture.close()
+    }
+
     private fun fixture(
         toolCapability: CapabilityId? = null,
         provider: AiProvider = ToolCallingProvider(),
+        maxConcurrentAgents: Int = 4,
     ): Fixture {
         val providerRegistry = ProviderRegistry().apply { register(provider) }
         val capabilities = CapabilityRegistry()
@@ -149,7 +207,14 @@ class SubAgentRunnerTest {
         val memory = RecordingMemory()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         return Fixture(
-            runner = SubAgentRunner(providerRegistry, tools, toolRuntime, memory, scope),
+            runner = SubAgentRunner(
+                providerRegistry,
+                tools,
+                toolRuntime,
+                memory,
+                scope,
+                maxConcurrentAgents = maxConcurrentAgents,
+            ),
             capabilities = capabilities,
             executions = executions,
             scope = scope,
@@ -157,13 +222,14 @@ class SubAgentRunnerTest {
     }
 
     private fun spec(
+        agentId: String = "browser-1",
         toolAllowlist: Set<String>,
         capabilityScope: Set<CapabilityId> = emptySet(),
         toolCallBudget: Int = 4,
         tokenBudget: Int = 1_000,
         timeoutMs: Long = 10_000,
     ) = SubAgentSpec(
-        agentId = "browser-1",
+        agentId = agentId,
         role = SubAgentRole.BROWSER,
         systemPrompt = "Perform browser research and report verified observations.",
         providerId = PROVIDER_ID,
@@ -231,6 +297,16 @@ class SubAgentRunnerTest {
         override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
             emit(GenerationEvent.Usage(promptTokens = 100, completionTokens = 1))
             emit(GenerationEvent.GenerationCompleted("budgeted"))
+        }
+    }
+
+    private class FailingProvider : AiProvider {
+        override val providerId = PROVIDER_ID
+        override val name = "Failing test provider"
+        override suspend fun listModels() = Result.success(listOf(model()))
+        override suspend fun testConnection() = Result.success(Unit)
+        override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+            throw IllegalStateException("simulated child provider failure")
         }
     }
 
