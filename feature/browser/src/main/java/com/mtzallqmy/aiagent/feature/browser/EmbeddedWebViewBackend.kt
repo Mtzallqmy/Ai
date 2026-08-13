@@ -5,11 +5,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
-/**
- * Embedded WebView browser backend — local, no external dependencies.
- * Uses WebViewEngine (already hardened with URL policy + safe JS injection).
- */
+/** Embedded WebView backend. All webpage content is untrusted. */
 class EmbeddedWebViewBackend(
     private val engineProvider: () -> WebViewEngine? = { null },
     private val timeoutMs: Long = 30_000L,
@@ -23,58 +23,64 @@ class EmbeddedWebViewBackend(
         CapabilityId("browser.type"),
     )
 
+    private val json = Json { ignoreUnknownKeys = true }
+
     override suspend fun isAvailable(): Boolean = engineProvider() != null
 
-    override suspend fun navigate(url: String): Boolean = runEngine { engine ->
-        engine.navigate(url).isSuccess
-    } ?: false
+    override suspend fun navigate(url: String): Boolean {
+        if (!BrowserSecurityPolicy.isAllowedUrl(url)) return false
+        return runEngine { engine -> engine.navigate(url).isSuccess } ?: false
+    }
 
-    override suspend fun currentState(): BrowserState = runEngineState { engine ->
-        BrowserState(
-            url = engine.currentUrl() ?: "",
-            title = "",
-            accessibleTree = engine.snapshot(),
-        )
-    } ?: BrowserState("", "", "")
+    override suspend fun currentState(): BrowserState = runEngineState(::snapshotState)
+        ?: BrowserState("", "", "")
 
-    override suspend fun click(selector: String): Boolean = runEngine { engine ->
-        engine.clickSelector(selector)
-    } ?: false
+    override suspend fun click(selector: String): Boolean {
+        if (!BrowserSecurityPolicy.isSafeSelector(selector)) return false
+        return runEngine { engine -> engine.clickSelector(selector) } ?: false
+    }
 
-    override suspend fun type(selector: String, text: String): Boolean = runEngine { engine ->
-        engine.typeIntoSelector(selector, text)
-    } ?: false
+    override suspend fun type(selector: String, text: String): Boolean {
+        if (!BrowserSecurityPolicy.isSafeSelector(selector) || !BrowserSecurityPolicy.isSafeText(text)) return false
+        return runEngine { engine -> engine.typeIntoSelector(selector, text) } ?: false
+    }
 
     override suspend fun submitForm(): Boolean = runEngine { engine ->
-        // Submit the active form via the focused element; falls back to Enter key on the last typed field.
-        engine.typeIntoSelector("input:focus, textarea:focus", "\n").not().let {
-            engine.snapshot().isNotEmpty() // page responded = plausible navigation
-        }
+        val submitted = engine.typeIntoSelector("input:focus, textarea:focus", "\n")
+        submitted && engine.snapshot().isNotEmpty()
     } ?: false
 
     override suspend fun verify(expected: BrowserExpectation): Boolean = runEngine { engine ->
-        val state = BrowserState(
-            url = engine.currentUrl() ?: "",
-            title = "",
-            accessibleTree = engine.snapshot(),
-        )
+        val state = snapshotState(engine)
         (expected.urlContains == null || state.url.contains(expected.urlContains, ignoreCase = true)) &&
-            (expected.titleContains == null || true) &&
+            (expected.titleContains == null || state.title.contains(expected.titleContains, ignoreCase = true)) &&
             (expected.elementPresent == null || expected.elementPresent in state.accessibleTree)
     } ?: false
 
-    private suspend fun runEngine(block: suspend (WebViewEngine) -> Boolean): Boolean? {
+    private suspend fun snapshotState(engine: WebViewEngine): BrowserState {
+        val sanitized = BrowserSnapshotSanitizer.sanitize(engine.snapshot())
+        val root = json.parseToJsonElement(sanitized).jsonObject
+        val title = root["title"]?.jsonPrimitive?.content.orEmpty()
+        return BrowserState(
+            url = engine.currentUrl() ?: root["url"]?.jsonPrimitive?.content.orEmpty(),
+            title = title,
+            accessibleTree = sanitized,
+        )
+    }
+
+    private suspend fun runEngine(block: suspend (WebViewEngine) -> Boolean): Boolean? = runCatching {
         val engine = engineProvider() ?: return null
-        return withContext(Dispatchers.Main) {
+        withContext(Dispatchers.Main) {
             withTimeout(timeoutMs) {
                 block(engine).also { delay(400) }
             }
         }
-    }
+    }.getOrNull()
 
-    private suspend fun runEngineState(block: suspend (WebViewEngine) -> BrowserState): BrowserState? =
+    private suspend fun runEngineState(block: suspend (WebViewEngine) -> BrowserState): BrowserState? = runCatching {
         withContext(Dispatchers.Main) {
             val engine = engineProvider() ?: return@withContext null
             withTimeout(timeoutMs) { block(engine) }
         }
+    }.getOrNull()
 }
