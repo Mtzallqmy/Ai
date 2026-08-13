@@ -87,6 +87,13 @@ class McpRuntime(
 
     suspend fun healthCheck(serverId: String): Boolean = session(serverId).client.healthCheck()
 
+    /** Safe observability surface: exposes IDs/health/tool IDs, never auth material or tokens. */
+    suspend fun connections(): List<McpConnection> = lock.withLock {
+        sessions.map { (serverId, session) ->
+            McpConnection(serverId, session.toolIds, session.client.isHealthy)
+        }
+    }
+
     suspend fun listResources(serverId: String): List<McpResource> {
         val session = session(serverId)
         require(session.configuration.permissions.resourcesAllowed) { "MCP resources permission is denied" }
