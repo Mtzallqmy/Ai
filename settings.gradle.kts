@@ -42,6 +42,7 @@ include(":core:sandbox")
 
 // Native security runtime
 include(":native:runtime-rust")
+include(":native:local-llm")
 
 // Feature modules
 include(":feature:chat")
