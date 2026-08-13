@@ -2,7 +2,6 @@ package com.mtzallqmy.aiagent.benchmark
 
 import androidx.benchmark.macro.CompilationMode
 import androidx.benchmark.macro.FrameTimingMetric
-import androidx.benchmark.macro.MacrobenchmarkScope
 import androidx.benchmark.macro.StartupMode
 import androidx.benchmark.macro.StartupTimingMetric
 import androidx.benchmark.macro.junit4.MacrobenchmarkRule
@@ -23,8 +22,8 @@ class StartupBenchmark {
         compilationMode = CompilationMode.Partial(),
         startupMode = StartupMode.COLD,
         iterations = 5,
-        setupBlock = MacrobenchmarkScope::pressHome,
-        measureBlock = MacrobenchmarkScope::startActivityAndWait,
+        setupBlock = { pressHome() },
+        measureBlock = { startActivityAndWait() },
     )
 
     private companion object {
