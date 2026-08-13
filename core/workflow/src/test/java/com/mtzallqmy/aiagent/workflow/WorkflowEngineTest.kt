@@ -2,6 +2,7 @@ package com.mtzallqmy.aiagent.workflow
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.TestScope
@@ -17,6 +18,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class WorkflowEngineTest {
     @Test
     fun `persists outputs and execution timeline`() = runTest {
@@ -230,7 +232,9 @@ class WorkflowEngineTest {
         actionExecutor = object : WorkflowActionExecutor {
             override suspend fun execute(node: WorkflowNode, context: WorkflowExecutionContext) = action(node, context)
         },
-        scope = backgroundScope,
+        // Use the TestScope itself: backgroundScope jobs are deliberately excluded
+        // from advanceUntilIdle and would leave assertions observing QUEUED runs.
+        scope = this,
     )
 
     private fun toolWorkflow(tool: ToolNode) = WorkflowDefinition(
