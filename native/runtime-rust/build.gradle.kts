@@ -28,9 +28,9 @@ val rustOutput = layout.buildDirectory.dir("rust-jni")
 val rustTarget = layout.buildDirectory.dir("cargo-target")
 
 val buildRustRuntime by tasks.registering(Exec::class) {
-    val manifest = project.file("rust/Cargo.toml")
     inputs.files(fileTree("rust") { include("**/*.rs", "Cargo.toml", "Cargo.lock") })
     outputs.dir(rustOutput)
+    workingDir(project.file("rust"))
     environment("CARGO_TARGET_DIR", rustTarget.get().asFile.absolutePath)
     commandLine(
         "cargo", "ndk",
@@ -39,7 +39,7 @@ val buildRustRuntime by tasks.registering(Exec::class) {
         "-t", "x86_64",
         "--platform", "26",
         "-o", rustOutput.get().asFile.absolutePath,
-        "build", "--release", "--manifest-path", manifest.absolutePath,
+        "build", "--release",
     )
 }
 
