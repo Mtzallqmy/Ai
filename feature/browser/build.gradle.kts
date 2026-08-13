@@ -38,6 +38,8 @@ android {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.squareup.okhttp)
     implementation(libs.squareup.okhttp.logging)
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 
 android {
     publishing {
