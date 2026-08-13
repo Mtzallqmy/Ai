@@ -63,6 +63,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
+/** Composition root. Credentials only enter at runtime through the vault. */
 class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -129,6 +130,7 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         databaseProvider = DatabaseProvider
         settings = SecureSettings(this)
         vault = CredentialVault(this)
+
         capabilityRegistry = CapabilityRegistry()
         approvalEngine = ApprovalEngine(ruleStore = SharedPreferencesApprovalRuleStore(this))
         toolRuntime = ToolRuntime(capabilityRegistry, approvalEngine)
@@ -181,11 +183,22 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         )
 
         toolRegistry = TypedToolRegistry().apply {
-            (FileToolSet(this@AegisApp).tools + HttpToolSet().tools + ClipboardToolSet(this@AegisApp).tools +
-                DeviceToolSet(this@AegisApp).tools + TerminalToolSet().tools + SshToolSet().tools).forEach(::register)
+            (
+                FileToolSet(this@AegisApp).tools +
+                    HttpToolSet().tools +
+                    ClipboardToolSet(this@AegisApp).tools +
+                    DeviceToolSet(this@AegisApp).tools +
+                    TerminalToolSet().tools +
+                    SshToolSet().tools
+                ).forEach(::register)
         }
         mcpRuntime = McpRuntime(toolRegistry) { configuration, authentication ->
-            McpClient(StreamableHttpMcpTransport(configuration.endpoint, authentication))
+            McpClient(
+                StreamableHttpMcpTransport(
+                    endpoint = configuration.endpoint,
+                    authentication = authentication,
+                ),
+            )
         }
         subAgentRunner = SubAgentRunner(
             providers = providerRegistry,
@@ -205,35 +218,52 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
             selectedProviderId = { settings.getString("embedding_provider_id") ?: "keyword-fallback" },
             vectorStoreFactory = { provider ->
                 val safeId = provider.providerId.replace(Regex("[^A-Za-z0-9._-]"), "_")
-                SQLiteVectorStore(this, provider.dimension, "aegis_vectors_${safeId}_${provider.dimension}.db")
+                SQLiteVectorStore(
+                    context = this,
+                    dimension = provider.dimension,
+                    databaseName = "aegis_vectors_${safeId}_${provider.dimension}.db",
+                )
             },
         )
         memoryRefiner = MemoryRefiner()
         heartbeatAgent = HeartbeatAgent()
-        deviceBackendRegistry = DeviceBackendRegistry().apply {
-            register(com.mtzallqmy.aiagent.tool.android.AccessibilityDeviceBackend())
-            register(com.mtzallqmy.aiagent.tool.android.AdbDeviceBackend())
-        }
+
+        deviceBackendRegistry = DeviceBackendRegistry()
+        deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AccessibilityDeviceBackend())
+        deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AdbDeviceBackend())
+
         codingBackend = com.mtzallqmy.aiagent.tool.terminal.LocalSandboxCoding()
+
         graphAgentEngine = GraphAgentEngine(entryNode = "plan") { nodeId, state ->
             when (nodeId) {
                 "plan" -> GraphAgentEngine.GraphNextStep.Goto("execute", state)
                 "execute" -> GraphAgentEngine.GraphNextStep.Goto("review", state)
-                "review" -> GraphAgentEngine.GraphNextStep.Interrupt("Review required", state)
-                else -> GraphAgentEngine.GraphNextStep.Complete(state)
+                else -> GraphAgentEngine.GraphNextStep.End(state)
             }
         }
+        graphAgentEngine.interruptBefore = setOf("review")
 
         workflowEngine = WorkflowEngine(
-            store = AtomicFileWorkflowStore(File(filesDir, "workflow_engine")),
-            actionExecutor = AppWorkflowActionExecutor(this),
+            store = AtomicFileWorkflowStore(File(noBackupFilesDir, "workflows/state.json")),
+            actionExecutor = AppWorkflowActionExecutor(
+                context = this,
+                providers = providerRegistry,
+                tools = toolRegistry,
+                toolRuntime = toolRuntime,
+                approvalEngine = approvalEngine,
+            ),
             scope = applicationScope,
         )
-        scheduleRuntime = ScheduleRuntime.from(this)
-        runtime = AgentRuntime(provider = smartRouter, toolRuntime = toolRuntime)
+        scheduleRuntime = ScheduleRuntime(this)
         applicationScope.launch { workflowEngine.recoverIncompleteRuns() }
+
+        runtime = AgentRuntime(provider = smartRouter, toolRuntime = toolRuntime)
     }
 
-    override suspend fun executeScheduledWorkflow(workflowId: String, workflowVersion: Int, input: kotlinx.serialization.json.JsonObject): String =
-        workflowEngine.start(workflowEngine.requireDefinition(workflowId, workflowVersion), input)
+    override suspend fun executeScheduledWorkflow(
+        workflowId: String,
+        workflowVersion: Int,
+        input: kotlinx.serialization.json.JsonObject,
+        scheduleId: String,
+    ): String = workflowEngine.startStored(workflowId, workflowVersion, input)
 }
