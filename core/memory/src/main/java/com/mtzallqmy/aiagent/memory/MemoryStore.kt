@@ -155,7 +155,8 @@ class MemoryStore(
         val dao = db().memoryDao()
         val existing = dao.get(id) ?: return null
         val now = clock()
-        check(existing.expiresAt == null || existing.expiresAt > now) { "Cannot edit expired memory" }
+        val expiresAt = existing.expiresAt
+        check(expiresAt == null || expiresAt > now) { "Cannot edit expired memory" }
         val old = metadata(existing)
         val updatedMeta = old.copy(contentHash = sha256(normalize(value)))
         val updated = existing.copy(
@@ -183,7 +184,8 @@ class MemoryStore(
         val dao = db().memoryDao()
         val existing = dao.get(id) ?: return null
         val now = clock()
-        if (existing.expiresAt != null && existing.expiresAt <= now) return null
+        val expiresAt = existing.expiresAt
+        if (expiresAt != null && expiresAt <= now) return null
         val old = metadata(existing)
         val updatedMeta = old.copy(hits = old.hits + 1, lastAccessedAt = now)
         val updated = existing.copy(
