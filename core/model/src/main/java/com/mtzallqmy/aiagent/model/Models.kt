@@ -150,7 +150,7 @@ data class ApprovalRequestDetails(
 )
 
 enum class ToolErrorCategory {
-    GENERIC, RETRYABLE, PERMISSION, APPROVAL_REQUIRED, CAPABILITY_UNAVAILABLE, TIMEOUT, CANCELLED
+    GENERIC, RETRYABLE, PERMISSION, POLICY_DENIED, APPROVAL_REQUIRED, CAPABILITY_UNAVAILABLE, TIMEOUT, CANCELLED
 }
 
 /** Model capability metadata for adaptive Agent behaviour. */
@@ -246,6 +246,8 @@ data class AgentRun(
     val provider: String,
     val model: String,
     val startedAt: Long,
+    val parentRunId: String? = null,
+    val memoryNamespace: String? = null,
     var completedAt: Long? = null,
     var promptTokens: Int = 0,
     var completionTokens: Int = 0,

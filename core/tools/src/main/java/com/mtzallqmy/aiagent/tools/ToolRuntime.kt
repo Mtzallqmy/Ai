@@ -4,8 +4,6 @@ import com.mtzallqmy.aiagent.capabilities.CapabilityRegistry
 import com.mtzallqmy.aiagent.common.AgentException
 import com.mtzallqmy.aiagent.model.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerializationException
 
 /** Typed tool contract: primitive platform capability. */
@@ -20,6 +18,12 @@ data class ToolContext(
     val workspaceId: String,
     /** Stable key for crash-retry deduplication when the calling workflow provides one. */
     val idempotencyKey: String? = null,
+    /** Null means the owning main runtime did not apply an additional capability scope. */
+    val capabilityScope: Set<CapabilityId>? = null,
+    /** Null means the owning main runtime did not apply an additional risk scope. */
+    val allowedRiskLevels: Set<RiskLevel>? = null,
+    val memoryNamespace: String? = null,
+    val parentRunId: String? = null,
 )
 
 sealed class ToolAvailability {
@@ -49,11 +53,14 @@ class ToolRuntime(
     private val capabilityRegistry: CapabilityRegistry,
     private val approvalEngine: ApprovalEngine,
 ) {
-    private val mutex = Mutex()
+    private val budgetLock = Any()
     private val toolCallCounts = mutableMapOf<String, Int>()
 
     /** Drops run-scoped approval grants when the owning agent run terminates. */
-    fun clearApprovalScope(runId: String) = approvalEngine.clearRun(runId)
+    fun clearApprovalScope(runId: String) {
+        approvalEngine.clearRun(runId)
+        synchronized(budgetLock) { toolCallCounts.remove(runId) }
+    }
 
     suspend fun registerAndList(tools: List<RegisteredTool>) = tools
 
@@ -106,19 +113,40 @@ class ToolRuntime(
         }
 
         // 1. Budget
-        val count = mutex.withLock {
-            toolCallCounts.getOrDefault(runId, 0) + 1
+        val count = synchronized(budgetLock) {
+            val next = toolCallCounts.getOrDefault(runId, 0) + 1
+            if (next <= maxToolCallsPerRun) toolCallCounts[runId] = next
+            next
         }
         if (count > maxToolCallsPerRun) {
             return failure(tool, "Tool-call budget exceeded ($maxToolCallsPerRun)",
                 ToolErrorCategory.GENERIC, isRetryable = false)
         }
-        mutex.withLock { toolCallCounts[runId] = count }
-
         val start = System.currentTimeMillis()
 
-        // 2. Policy + approval. This is the only approval path for every tool call.
+        // 2. Runtime scope policy. A delegated agent can only reduce authority.
         onStateChange(ToolRuntimeState.CHECKING_POLICY)
+        if (context.allowedRiskLevels?.contains(tool.descriptor.riskLevel) == false) {
+            return failure(
+                tool,
+                "Risk ${tool.descriptor.riskLevel} is outside the delegated agent policy",
+                ToolErrorCategory.POLICY_DENIED,
+                durationMs = System.currentTimeMillis() - start,
+                isRetryable = false,
+            )
+        }
+        val capabilityScope = context.capabilityScope
+        if (capabilityScope != null && !capabilityScope.containsAll(tool.descriptor.requiredCapabilities)) {
+            return failure(
+                tool,
+                "Tool requires capabilities outside the delegated agent scope",
+                ToolErrorCategory.POLICY_DENIED,
+                durationMs = System.currentTimeMillis() - start,
+                isRetryable = false,
+            )
+        }
+
+        // 3. Approval. This is the only approval path for every tool call.
         val approvalRequest = ApprovalRequest(
             toolName = tool.descriptor.displayName,
             toolId = tool.descriptor.id,
@@ -144,7 +172,7 @@ class ToolRuntime(
                 durationMs = System.currentTimeMillis() - start, isRetryable = false)
         }
 
-        // 3. Availability via Capability Registry
+        // 4. Availability via Capability Registry
         onStateChange(ToolRuntimeState.CHECKING_CAPABILITIES)
         val availability = tool.availability(context)
         if (availability !is ToolAvailability.Available) {
@@ -152,7 +180,7 @@ class ToolRuntime(
                 ToolErrorCategory.CAPABILITY_UNAVAILABLE, durationMs = System.currentTimeMillis() - start)
         }
 
-        // 4. Capability gate
+        // 5. Capability gate
         for (cap in tool.descriptor.requiredCapabilities) {
             val capStatus = capabilityRegistry.status(cap)
             if (capStatus.state != CapabilityAvailabilityState.AVAILABLE &&
@@ -163,7 +191,7 @@ class ToolRuntime(
             }
         }
 
-        // 5. Timed execution with cancellation + retries
+        // 6. Timed execution with cancellation + retries
         onStateChange(ToolRuntimeState.EXECUTING)
         var attempt = 0
         while (true) {

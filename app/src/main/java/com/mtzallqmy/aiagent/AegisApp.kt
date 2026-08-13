@@ -5,10 +5,12 @@ import com.mtzallqmy.aiagent.agent.AgentRuntime
 import com.mtzallqmy.aiagent.agent.ContextManager
 import com.mtzallqmy.aiagent.agent.GraphAgentEngine
 import com.mtzallqmy.aiagent.agent.HeartbeatAgent
+import com.mtzallqmy.aiagent.agent.MemoryStoreSubAgentMemoryGateway
 import com.mtzallqmy.aiagent.agent.ProviderRegistry
 import com.mtzallqmy.aiagent.agent.SkillRegistry
 import com.mtzallqmy.aiagent.agent.SmartRouterConfiguration
 import com.mtzallqmy.aiagent.agent.SmartRoutingProvider
+import com.mtzallqmy.aiagent.agent.SubAgentRunner
 import com.mtzallqmy.aiagent.agent.backends.DeviceBackend
 import com.mtzallqmy.aiagent.agent.backends.DeviceBackendRegistry
 import com.mtzallqmy.aiagent.agent.backends.CodingBackend
@@ -94,6 +96,8 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
     lateinit var contextManager: ContextManager
         private set
     lateinit var memoryStore: MemoryStore
+        private set
+    lateinit var subAgentRunner: SubAgentRunner
         private set
     lateinit var workspaceManager: WorkspaceManager
         private set
@@ -191,6 +195,13 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
                     SshToolSet().tools
                 ).forEach(::register)
         }
+        subAgentRunner = SubAgentRunner(
+            providers = providerRegistry,
+            tools = toolRegistry,
+            toolRuntime = toolRuntime,
+            memory = MemoryStoreSubAgentMemoryGateway(memoryStore),
+            scope = applicationScope,
+        )
 
         // Phase 5 integrations (studied reference repos, clean-room implementations)
         val vectorStore = InMemoryVectorStore()

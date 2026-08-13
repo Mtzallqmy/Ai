@@ -89,6 +89,24 @@ class ToolRuntimeApprovalTest {
         assertEquals(0, tool.executionCount)
     }
 
+    @Test
+    fun `delegated risk scope denies before approval`() = runTest {
+        val engine = ApprovalEngine { ApprovalPolicy.ASK_EVERY_TIME }
+        val tool = CountingTool()
+
+        val result = runtime(engine).execute(
+            registered(tool),
+            "{}",
+            context.copy(allowedRiskLevels = setOf(RiskLevel.SAFE)),
+            "run-delegated-policy",
+        )
+
+        assertFalse(result.success)
+        assertEquals(ToolErrorCategory.POLICY_DENIED, result.errorCategory)
+        assertEquals(0, tool.executionCount)
+        assertNull(engine.requests.tryReceive().getOrNull())
+    }
+
     private fun runtime(engine: ApprovalEngine) = ToolRuntime(CapabilityRegistry(), engine)
 
     private fun registered(tool: CountingTool) =
