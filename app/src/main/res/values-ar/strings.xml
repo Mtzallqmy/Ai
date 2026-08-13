@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">إيجيس وكيل ذكي</string>
+    <string name="tab_chat">الوكيل</string>
+    <string name="tab_tools">الأدوات</string>
+    <string name="tab_providers">المزودون</string>
+    <string name="tab_security">الأمان</string>
+    <string name="tab_settings">الإعدادات</string>
+    <string name="tab_logs">السجلات</string>
+    <string name="send">إرسال</string>
+    <string name="stop">إيقاف</string>
+    <string name="ask_agent">اطلب من الوكيل تنفيذ مهمة…</string>
+    <string name="test">اختبار</string>
+    <string name="not_tested">لم يتم الاختبار بعد</string>
+    <string name="connected">متصل</string>
+    <string name="arabic_mode">الوضع العربي</string>
+    <string name="accessibility_service_description">خدمة إيجيس للوصول تتيح للوكيل مراقبة الشاشة والتفاعل معها بموافقتك الصريحة فقط.</string>
+</resources>

@@ -1,7 +1,12 @@
-/gradle-8.5/
-/gradle-8.5-bin.zip
 .gradle/
 build/
+captures/
 .idea/
 *.iml
+local.properties
 .DS_Store
+*.apk
+*.aab
+*.jks
+*.keystore
+buildSrc/build/
