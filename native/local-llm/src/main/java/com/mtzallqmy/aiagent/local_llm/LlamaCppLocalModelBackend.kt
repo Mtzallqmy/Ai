@@ -19,12 +19,18 @@ import java.util.concurrent.ConcurrentHashMap
 class LlamaCppLocalModelBackend internal constructor(
     private val discovery: LocalModelDiscovery,
     resources: LocalDeviceResources,
-    private val native: LlamaNativeBridge,
+    nativeOverride: LlamaNativeBridge?,
 ) : LocalModelBackend {
     constructor(
         modelRoots: Collection<File>,
         resources: LocalDeviceResources,
-    ) : this(LocalModelDiscovery(modelRoots), resources, LlamaCppJniBridge())
+    ) : this(LocalModelDiscovery(modelRoots), resources, null)
+
+    // Do not load a 64-bit JNI library at app startup on an unsupported process.
+    // Preflight rejects the ABI before this lazy boundary is reached.
+    private val native: LlamaNativeBridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        nativeOverride ?: LlamaCppJniBridge()
+    }
 
     private val preflight = LocalModelPreflight(discovery, resources)
     private val operationMutex = Mutex()

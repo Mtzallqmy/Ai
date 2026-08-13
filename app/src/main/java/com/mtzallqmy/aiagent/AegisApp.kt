@@ -7,6 +7,8 @@ import com.mtzallqmy.aiagent.agent.GraphAgentEngine
 import com.mtzallqmy.aiagent.agent.HeartbeatAgent
 import com.mtzallqmy.aiagent.agent.ProviderRegistry
 import com.mtzallqmy.aiagent.agent.SkillRegistry
+import com.mtzallqmy.aiagent.agent.SmartRouterConfiguration
+import com.mtzallqmy.aiagent.agent.SmartRoutingProvider
 import com.mtzallqmy.aiagent.agent.backends.DeviceBackend
 import com.mtzallqmy.aiagent.agent.backends.DeviceBackendRegistry
 import com.mtzallqmy.aiagent.agent.backends.CodingBackend
@@ -19,11 +21,14 @@ import com.mtzallqmy.aiagent.memory.InMemoryVectorStore
 import com.mtzallqmy.aiagent.memory.KeywordEmbedder
 import com.mtzallqmy.aiagent.memory.MemoryRefiner
 import com.mtzallqmy.aiagent.memory.MemoryStore
+import com.mtzallqmy.aiagent.local_llm.AndroidLocalDeviceResources
+import com.mtzallqmy.aiagent.local_llm.LlamaCppLocalModelBackend
 import com.mtzallqmy.aiagent.provider.anthropic.AnthropicProvider
 import com.mtzallqmy.aiagent.provider.compatible.OpenAiCompatibleProvider
 import com.mtzallqmy.aiagent.provider.google.GeminiProvider
 import com.mtzallqmy.aiagent.provider.openai.OpenAiProvider
 import com.mtzallqmy.aiagent.provider.openrouter.OpenRouterProvider
+import com.mtzallqmy.aiagent.provider.local.LocalProvider
 import com.mtzallqmy.aiagent.security.CredentialScope
 import com.mtzallqmy.aiagent.security.CredentialVault
 import com.mtzallqmy.aiagent.sandbox.ProotLinuxBackend
@@ -39,6 +44,7 @@ import com.mtzallqmy.aiagent.tools.SharedPreferencesApprovalRuleStore
 import com.mtzallqmy.aiagent.tools.ToolRuntime
 import com.mtzallqmy.aiagent.tools.TypedToolRegistry
 import com.mtzallqmy.aiagent.workspace.WorkspaceManager
+import java.io.File
 
 /**
  * Minimal composition root: wires all registered implementations.
@@ -61,6 +67,10 @@ class AegisApp : Application() {
     lateinit var toolRegistry: TypedToolRegistry
         private set
     lateinit var providerRegistry: ProviderRegistry
+        private set
+    lateinit var localProvider: LocalProvider
+        private set
+    lateinit var smartRouter: SmartRoutingProvider
         private set
     lateinit var sandboxBackendRegistry: SandboxBackendRegistry
         private set
@@ -120,6 +130,29 @@ class AegisApp : Application() {
             ),
         )
 
+        val internalModels = File(filesDir, "models").apply { mkdirs() }
+        val modelRoots = buildList {
+            add(internalModels)
+            getExternalFilesDir("models")?.apply { mkdirs() }?.let(::add)
+        }
+        localProvider = LocalProvider(
+            backend = LlamaCppLocalModelBackend(
+                modelRoots = modelRoots,
+                resources = AndroidLocalDeviceResources(this),
+            ),
+        )
+        providerRegistry.register(localProvider)
+
+        smartRouter = SmartRoutingProvider(
+            registry = providerRegistry,
+            configuration = SmartRouterConfiguration(
+                enabled = { settings.getBoolean("smart_routing") },
+                selectedProviderId = { settings.getString("selected_provider_id") ?: "openai" },
+                selectedModelId = { settings.getString("selected_model_id") },
+            ),
+        )
+        providerRegistry.register(smartRouter)
+
         contextManager = ContextManager()
         memoryStore = MemoryStore { databaseProvider.get(this) }
         workspaceManager = WorkspaceManager(this)
@@ -169,7 +202,7 @@ class AegisApp : Application() {
         graphAgentEngine.interruptBefore = setOf("review")
 
         runtime = AgentRuntime(
-            provider = providerRegistry.select("openai"),
+            provider = smartRouter,
             toolRuntime = toolRuntime,
         )
     }

@@ -46,6 +46,7 @@ class OpenAiProvider(
                         name = m.id,
                         providerId = providerId,
                         capabilities = mapCapabilities(m.id),
+                        routing = mapRouting(m.id),
                     )
                 }
                 Result.success(models)
@@ -200,6 +201,15 @@ class OpenAiProvider(
             modelId.startsWith("gpt-3.5") -> 16_385
             else -> 128_000
         },
+    )
+
+    private fun mapRouting(modelId: String) = ModelRoutingMetadata(
+        speedTier = when {
+            modelId.contains("nano", true) || modelId.contains("mini", true) -> ModelSpeedTier.FAST
+            modelId.contains("pro", true) -> ModelSpeedTier.QUALITY
+            else -> ModelSpeedTier.BALANCED
+        },
+        codingOptimized = modelId.contains("codex", true) || modelId.contains("code", true),
     )
 
     private fun mapHttpError(code: Int): ProviderError = when (code) {

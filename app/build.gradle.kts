@@ -103,6 +103,7 @@ dependencies {
     implementation(project(":provider:google"))
     implementation(project(":provider:openrouter"))
     implementation(project(":provider:openai-compatible"))
+    implementation(project(":provider:local"))
 
     // Platform
     implementation(libs.androidx.core.ktx)

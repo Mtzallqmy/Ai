@@ -66,8 +66,20 @@ open class OpenAiCompatibleProvider(
                     }
                 }
                 val models = entries.map { e ->
-                    AiModel(id = e.id, name = e.id, providerId = providerId,
-                        capabilities = ModelCapabilities(chat = true, streaming = true))
+                    AiModel(
+                        id = e.id,
+                        name = e.id,
+                        providerId = providerId,
+                        capabilities = ModelCapabilities(chat = true, streaming = true),
+                        routing = ModelRoutingMetadata(
+                            speedTier = when {
+                                e.id.contains("flash", true) || e.id.contains("mini", true) || e.id.contains("small", true) -> ModelSpeedTier.FAST
+                                e.id.contains("large", true) || e.id.contains("pro", true) -> ModelSpeedTier.QUALITY
+                                else -> ModelSpeedTier.BALANCED
+                            },
+                            codingOptimized = e.id.contains("coder", true) || e.id.contains("code", true),
+                        ),
+                    )
                 }
                 Result.success(models)
             }

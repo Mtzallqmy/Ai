@@ -60,6 +60,10 @@ class GeminiProvider(
                             contextWindow = inputTokens,
                             maxOutputTokens = outputTokens,
                         ),
+                        routing = ModelRoutingMetadata(
+                            speedTier = if (id.contains("flash", true)) ModelSpeedTier.FAST else ModelSpeedTier.QUALITY,
+                            codingOptimized = id.contains("code", true),
+                        ),
                     )
                 }
                 Result.success(result)

@@ -54,6 +54,13 @@ class AnthropicProvider(
                             contextWindow = m.maxInputTokens ?: 200_000,
                             maxOutputTokens = m.maxOutputTokens ?: 16_000,
                         ),
+                        routing = ModelRoutingMetadata(
+                            speedTier = when {
+                                m.id.contains("haiku", true) -> ModelSpeedTier.FAST
+                                m.id.contains("opus", true) -> ModelSpeedTier.QUALITY
+                                else -> ModelSpeedTier.BALANCED
+                            },
+                        ),
                     )
                 }
                 Result.success(models)
