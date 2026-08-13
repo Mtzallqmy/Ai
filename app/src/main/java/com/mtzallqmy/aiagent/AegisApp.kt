@@ -134,12 +134,11 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         vault = CredentialVault(this)
 
         capabilityRegistry = CapabilityRegistry()
+        registerAppCapabilities(this, capabilityRegistry)
         approvalEngine = ApprovalEngine(ruleStore = SharedPreferencesApprovalRuleStore(this))
         toolRuntime = ToolRuntime(capabilityRegistry, approvalEngine)
 
         providerRegistry = ProviderRegistry()
-        // Keys are resolved lazily from the CredentialVault (Android Keystore). No secret ever
-        // lives in these lambdas or in memory beyond the loaded value.
         providerRegistry.register(
             OpenAiProvider(apiKeyProvider = { vault.load(CredentialScope.PROVIDER, "openai_api_key") }),
         )
@@ -246,14 +245,12 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         memoryRefiner = MemoryRefiner()
         heartbeatAgent = HeartbeatAgent()
 
-        // Device backends: Accessibility (on-device) + ADB (optional, requires PC pairing)
         deviceBackendRegistry = DeviceBackendRegistry()
         deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AccessibilityDeviceBackend())
         deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AdbDeviceBackend())
 
         codingBackend = com.mtzallqmy.aiagent.tool.terminal.LocalSandboxCoding()
 
-        // Minimal proof-of-concept graph: plan -> execute -> review with interrupt at review
         graphAgentEngine = GraphAgentEngine(entryNode = "plan") { nodeId, state ->
             when (nodeId) {
                 "plan" -> GraphAgentEngine.GraphNextStep.Goto("execute", state)
