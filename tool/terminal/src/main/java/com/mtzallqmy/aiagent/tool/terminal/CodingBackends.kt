@@ -16,14 +16,15 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
- * On-device coding backend — executes coding tasks in a sandboxed shell
- * using TerminalToolSet (allow-listed commands). No NDK, no external runtime.
+ * On-device coding backend. Each approved step is parsed as direct argv by
+ * TerminalToolSet and executed through the isolated Rust runtime; no app-process
+ * shell or command-chain interpretation is used.
  */
 class LocalSandboxCoding(
     private val terminal: TerminalToolSet = TerminalToolSet(),
 ) : CodingBackend {
     override val id: String = "local_sandbox"
-    override val name: String = "Local Sandboxed Shell"
+    override val name: String = "Local Isolated Commands"
     override val capabilities: Set<CapabilityId> = setOf(
         CapabilityId("coding.run"),
         CapabilityId("coding.lint"),
@@ -31,21 +32,28 @@ class LocalSandboxCoding(
     )
 
     override suspend fun isAvailable(): Boolean = runCatching {
-        terminal.executeCommand("sh -c 'echo ok'").exitCode == 0
+        terminal.executeCommand("echo ok").let { it.exitCode == 0 && it.stdout.trim() == "ok" }
     }.getOrDefault(false)
 
     override suspend fun run(task: String, context: Map<String, String>): CodingResult = withContext(Dispatchers.IO) {
-        // Decompose the task into safe, observable shell steps: the agent
-        // runtime (not this class) generates the step plan with approval.
         val steps = context["steps_json"]
-            ?.let { runCatching { Json.parseToJsonElement(it).jsonObject["steps"]?.let { s -> (s as? kotlinx.serialization.json.JsonArray)?.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "" }?.filterNotNull() } }.getOrNull() }
-            ?: listOf<String>()
+            ?.let {
+                runCatching {
+                    Json.parseToJsonElement(it).jsonObject["steps"]
+                        ?.let { value ->
+                            (value as? kotlinx.serialization.json.JsonArray)
+                                ?.mapNotNull { item -> (item as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                                ?.filter { command -> command.isNotBlank() }
+                        }
+                }.getOrNull()
+            }
+            ?: emptyList()
 
         if (steps.isEmpty()) {
             return@withContext CodingResult(
                 success = false,
                 summary = "No execution steps provided",
-                errors = listOf("Pass 'steps_json' with an array of allowed commands"),
+                errors = listOf("Pass 'steps_json' with an array of allow-listed direct commands"),
             )
         }
 
@@ -53,7 +61,7 @@ class LocalSandboxCoding(
         var failed = false
         for (step in steps) {
             val result = terminal.executeCommand(step)
-            outputs.add("> $step\n${result.stdout}${result.stderr}")
+            outputs += "> $step\n${result.stdout}${result.stderr}"
             if (result.exitCode != 0) {
                 failed = true
                 break
@@ -69,11 +77,7 @@ class LocalSandboxCoding(
     }
 }
 
-/**
- * OpenHands remote adapter (MIT concepts, clean-room reimplementation):
- * posts a run to an OpenHands REST endpoint and polls until finished.
- * Requires a user-configured self-hosted OpenHands URL + token.
- */
+/** Remote OpenHands adapter. Requires an explicitly configured self-hosted endpoint and token. */
 class OpenHandsRemote(
     private val baseUrlProvider: suspend () -> String?,
     private val tokenProvider: suspend () -> String?,
