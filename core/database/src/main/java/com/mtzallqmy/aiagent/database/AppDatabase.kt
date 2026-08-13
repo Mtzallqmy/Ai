@@ -32,8 +32,7 @@ data class ConversationEntity(
     val model: String,
 )
 
-@Entity(tableName = "conversation_messages",
-    indices = [Index("conversationId")])
+@Entity(tableName = "conversation_messages", indices = [Index("conversationId")])
 data class ConversationMessageEntity(
     @PrimaryKey val messageId: String,
     val conversationId: String,
@@ -47,7 +46,7 @@ data class ConversationMessageEntity(
 data class MemoryEntity(
     @PrimaryKey val id: String,
     val namespace: String,
-    val type: String, // conversation, working, long_term, procedural, workspace
+    val type: String,
     val key: String,
     val value: String,
     val metadata: String?,
@@ -64,10 +63,10 @@ data class SkillEntity(
     @PrimaryKey val name: String,
     val version: String,
     val description: String,
-    val requiredCapabilities: String, // comma-separated CapabilityIds
+    val requiredCapabilities: String,
     val instructions: String,
     val enabled: Boolean,
-    val source: String, // bundled, user
+    val source: String,
 )
 
 /** Workflow definitions persisted. */
@@ -81,7 +80,7 @@ data class WorkflowEntity(
     val lastRunAt: Long?,
 )
 
-/** MCP server configuration (no secrets stored here; secrets live in CredentialVault). */
+/** MCP server configuration; secrets remain in CredentialVault. */
 @Entity(tableName = "mcp_servers")
 data class McpServerEntity(
     @PrimaryKey val serverId: String,
@@ -92,7 +91,7 @@ data class McpServerEntity(
     val health: String?,
 )
 
-/** Provider configuration (model selections) — no secrets stored. */
+/** Provider configuration; credential values are never stored here. */
 @Entity(tableName = "provider_configs")
 data class ProviderConfigEntity(
     @PrimaryKey val providerId: String,
@@ -100,7 +99,7 @@ data class ProviderConfigEntity(
     val selectedModel: String?,
     val baseUrl: String?,
     val apiVersion: String?,
-    val keyCount: Int, // number of keys in vault (never the keys themselves)
+    val keyCount: Int,
 )
 
 @Dao
@@ -198,16 +197,31 @@ interface ProviderConfigDao {
 
 @Database(
     entities = [
-        RunEntity::class, ConversationEntity::class, ConversationMessageEntity::class,
-        MemoryEntity::class, SkillEntity::class, WorkflowEntity::class,
-        McpServerEntity::class, ProviderConfigEntity::class,
+        RunEntity::class,
+        ConversationEntity::class,
+        ConversationMessageEntity::class,
+        ToolExecutionEntity::class,
+        WorkflowRunEntity::class,
+        ScheduleEntity::class,
+        ApprovalHistoryEntity::class,
+        ArtifactEntity::class,
+        MemoryEntity::class,
+        SkillEntity::class,
+        WorkflowEntity::class,
+        McpServerEntity::class,
+        ProviderConfigEntity::class,
     ],
-    version = 1,
-    exportSchema = false,
+    version = 2,
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun runDao(): RunDao
     abstract fun conversationDao(): ConversationDao
+    abstract fun toolExecutionDao(): ToolExecutionDao
+    abstract fun workflowRunDao(): WorkflowRunDao
+    abstract fun scheduleDao(): ScheduleDao
+    abstract fun approvalHistoryDao(): ApprovalHistoryDao
+    abstract fun artifactDao(): ArtifactDao
     abstract fun memoryDao(): MemoryDao
     abstract fun skillDao(): SkillDao
     abstract fun workflowDao(): WorkflowDao
