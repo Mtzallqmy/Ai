@@ -2,8 +2,8 @@ package com.mtzallqmy.aiagent.local_llm
 
 import com.mtzallqmy.aiagent.local_llm.internal.LlamaNativeBridge
 import com.mtzallqmy.aiagent.local_llm.internal.NativeModelInfo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -51,7 +51,9 @@ class LlamaCppLocalModelBackendTest {
         val assessment = backend.assessLoad(reference, options)
         backend.load(reference, options, assessment.assessmentId)
 
-        val collection = async { backend.generate("Hello").toList() }
+        // The fake native call intentionally blocks until cancellation. Run collection
+        // on a worker so this test thread remains able to issue cancelGeneration().
+        val collection = async(Dispatchers.Default) { backend.generate("Hello").toList() }
         assertTrue(native.generationStarted.await(2, TimeUnit.SECONDS))
         backend.cancelGeneration()
         collection.await()
