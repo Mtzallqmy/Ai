@@ -103,6 +103,7 @@ class RagComponentsTest {
         assertFailsWith<IllegalArgumentException> {
             store.search("ns", listOf(1.0, 0.0), topK = 0)
         }
+        Unit
     }
 
     @Test
