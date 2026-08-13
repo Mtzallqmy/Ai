@@ -138,8 +138,17 @@ interface MemoryDao {
     @Query("SELECT * FROM memories WHERE namespace = :namespace AND (expiresAt IS NULL OR expiresAt > :now) ORDER BY score DESC")
     fun list(namespace: String, now: Long = System.currentTimeMillis()): Flow<List<MemoryEntity>>
 
-    @Query("SELECT * FROM memories WHERE key LIKE '%' || :query || '%' AND namespace = :namespace")
-    suspend fun search(namespace: String, query: String): List<MemoryEntity>
+    @Query("SELECT * FROM memories WHERE id = :id")
+    suspend fun get(id: String): MemoryEntity?
+
+    @Query("SELECT * FROM memories WHERE namespace = :namespace AND key = :key AND type = :type AND (expiresAt IS NULL OR expiresAt > :now)")
+    suspend fun getByIdentity(namespace: String, type: String, key: String, now: Long): List<MemoryEntity>
+
+    @Query("SELECT * FROM memories WHERE namespace = :namespace AND (key LIKE '%' || :query || '%' OR value LIKE '%' || :query || '%') AND (expiresAt IS NULL OR expiresAt > :now) ORDER BY pinned DESC, score DESC, updatedAt DESC LIMIT :limit")
+    suspend fun search(namespace: String, query: String, now: Long, limit: Int): List<MemoryEntity>
+
+    @Query("DELETE FROM memories WHERE expiresAt IS NOT NULL AND expiresAt <= :now")
+    suspend fun deleteExpired(now: Long): Int
 
     @Query("DELETE FROM memories WHERE id = :id")
     suspend fun delete(id: String)

@@ -28,6 +28,12 @@ interface LocalModelBackend {
     ): Flow<LocalGenerationEvent>
 
     suspend fun cancelGeneration()
+
+    /** Produces a real model embedding from the currently loaded GGUF model. */
+    suspend fun embed(
+        text: String,
+        options: LocalEmbeddingOptions = LocalEmbeddingOptions(),
+    ): LocalEmbedding = throw UnsupportedOperationException("This local backend does not support embeddings")
 }
 
 sealed interface LocalModelState {
@@ -35,6 +41,7 @@ sealed interface LocalModelState {
     data class Loading(val path: String) : LocalModelState
     data class Ready(val model: LoadedLocalModel) : LocalModelState
     data class Generating(val model: LoadedLocalModel) : LocalModelState
+    data class Embedding(val model: LoadedLocalModel) : LocalModelState
     data class Failed(val message: String) : LocalModelState
 }
 
@@ -92,6 +99,7 @@ data class LoadedLocalModel(
     val nativeDescription: String,
     val parameterCount: Long,
     val tensorBytes: Long,
+    val embeddingDimension: Int,
     val options: LocalModelLoadOptions,
 )
 
@@ -114,6 +122,23 @@ sealed interface LocalGenerationEvent {
 data class LocalTokenUsage(
     val promptTokens: Int,
     val generatedTokens: Int,
+    val elapsedMillis: Long,
+)
+
+data class LocalEmbeddingOptions(
+    val contextSize: Int = 512,
+    val threads: Int = 4,
+    val normalize: Boolean = true,
+) {
+    init {
+        require(contextSize in 64..8192)
+        require(threads in 1..32)
+    }
+}
+
+data class LocalEmbedding(
+    val values: List<Double>,
+    val modelSha256: String,
     val elapsedMillis: Long,
 )
 

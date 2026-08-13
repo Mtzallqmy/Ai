@@ -17,12 +17,20 @@ internal interface LlamaNativeBridge {
     fun cancelGeneration(generationHandle: Long)
     fun generationUsage(generationHandle: Long): LongArray
     fun freeGeneration(generationHandle: Long)
+    fun embed(
+        modelHandle: Long,
+        text: String,
+        contextSize: Int,
+        threads: Int,
+        normalize: Boolean,
+    ): FloatArray = throw UnsupportedOperationException("Native embedding is unavailable")
 }
 
 internal data class NativeModelInfo(
     val description: String,
     val parameterCount: Long,
     val tensorBytes: Long,
+    val embeddingDimension: Int,
 )
 
 internal class LlamaCppJniBridge : LlamaNativeBridge {
@@ -34,10 +42,12 @@ internal class LlamaCppJniBridge : LlamaNativeBridge {
     private external fun modelDescription(modelHandle: Long): String
     private external fun modelParameterCount(modelHandle: Long): Long
     private external fun modelTensorBytes(modelHandle: Long): Long
+    private external fun modelEmbeddingDimension(modelHandle: Long): Int
     override fun modelInfo(modelHandle: Long) = NativeModelInfo(
         description = modelDescription(modelHandle),
         parameterCount = modelParameterCount(modelHandle),
         tensorBytes = modelTensorBytes(modelHandle),
+        embeddingDimension = modelEmbeddingDimension(modelHandle),
     )
     override external fun unloadModel(modelHandle: Long)
     override external fun startGeneration(
@@ -53,4 +63,11 @@ internal class LlamaCppJniBridge : LlamaNativeBridge {
     override external fun cancelGeneration(generationHandle: Long)
     override external fun generationUsage(generationHandle: Long): LongArray
     override external fun freeGeneration(generationHandle: Long)
+    override external fun embed(
+        modelHandle: Long,
+        text: String,
+        contextSize: Int,
+        threads: Int,
+        normalize: Boolean,
+    ): FloatArray
 }
