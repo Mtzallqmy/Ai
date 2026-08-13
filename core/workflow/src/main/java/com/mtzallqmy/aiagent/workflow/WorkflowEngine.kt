@@ -78,6 +78,12 @@ class WorkflowEngine(
         return runId
     }
 
+    suspend fun startStored(workflowId: String, workflowVersion: Int, input: JsonObject): String {
+        val definition = store.getDefinition(workflowId, workflowVersion)
+            ?: throw IllegalArgumentException("Workflow definition not found: $workflowId@$workflowVersion")
+        return start(definition, input)
+    }
+
     suspend fun pause(runId: String) = mutateRun(runId) { run ->
         require(run.status == WorkflowRunStatus.RUNNING || run.status == WorkflowRunStatus.QUEUED) {
             "Run cannot be paused from ${run.status}"
