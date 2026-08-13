@@ -165,6 +165,7 @@ class AgentRuntime(
                 appendTimeline(runRecord.runId, "Token budget exhausted — finalizing")
                 _state.value = AgentState.COMPLETED
                 _events.emit(GenerationEvent.GenerationCompleted("Token budget exhausted. Task stopped to stay within the configured limit."))
+                toolRuntime.clearApprovalScope(runRecord.runId)
                 persist(runRecord)
                 return
             }
@@ -176,6 +177,7 @@ class AgentRuntime(
                 appendTimeline(runRecord.runId, "Completed")
                 _state.value = AgentState.COMPLETED
                 _events.emit(GenerationEvent.GenerationCompleted(assistantText))
+                toolRuntime.clearApprovalScope(runRecord.runId)
                 persist(runRecord)
                 return
             }
@@ -224,6 +226,7 @@ class AgentRuntime(
             _state.value = AgentState.FAILED
             _events.emit(GenerationEvent.GenerationFailed(
                 ProviderError.ProviderError_(429, "Maximum steps ($maxSteps) exceeded")))
+            toolRuntime.clearApprovalScope(runRecord.runId)
             persist(runRecord)
         }
     }
@@ -264,6 +267,7 @@ class AgentRuntime(
         runRecord.status = status
         appendTimeline(runRecord.runId, timelineLabel, error = runRecord.errors.takeIf { it > 0 }?.let { "errors=$it" })
         _state.value = targetState
+        toolRuntime.clearApprovalScope(runRecord.runId)
         if (failedEvent != null) _run.value = runRecord
         persist(runRecord)
     }

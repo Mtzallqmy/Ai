@@ -46,6 +46,9 @@ class ToolRuntime(
     private val mutex = Mutex()
     private val toolCallCounts = mutableMapOf<String, Int>()
 
+    /** Drops run-scoped approval grants when the owning agent run terminates. */
+    fun clearApprovalScope(runId: String) = approvalEngine.clearRun(runId)
+
     suspend fun registerAndList(tools: List<AgentTool<*, *>>) = tools
 
     suspend fun execute(
@@ -93,11 +96,14 @@ class ToolRuntime(
         onStateChange(ToolRuntimeState.CHECKING_POLICY)
         val approvalRequest = ApprovalRequest(
             toolName = tool.descriptor.displayName,
+            toolId = tool.descriptor.id,
             action = "execute",
             target = tool.descriptor.id,
             argumentsSummary = typedInput.toString().take(200),
             riskLevel = tool.descriptor.riskLevel,
             requestingAgent = agentId,
+            agentScope = agentId,
+            runId = runId,
             reason = "Requested during run $runId",
         )
         val immediate = approvalEngine.decide(approvalRequest)

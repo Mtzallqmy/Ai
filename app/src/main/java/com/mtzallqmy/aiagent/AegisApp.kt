@@ -31,6 +31,7 @@ import com.mtzallqmy.aiagent.tool.filesystem.FileToolSet
 import com.mtzallqmy.aiagent.tool.http.HttpToolSet
 import com.mtzallqmy.aiagent.tool.ssh.SshToolSet
 import com.mtzallqmy.aiagent.tools.ApprovalEngine
+import com.mtzallqmy.aiagent.tools.SharedPreferencesApprovalRuleStore
 import com.mtzallqmy.aiagent.tools.ToolRuntime
 import com.mtzallqmy.aiagent.workspace.WorkspaceManager
 
@@ -85,7 +86,7 @@ class AegisApp : Application() {
         vault = CredentialVault(this)
 
         capabilityRegistry = CapabilityRegistry()
-        approvalEngine = ApprovalEngine()
+        approvalEngine = ApprovalEngine(ruleStore = SharedPreferencesApprovalRuleStore(this))
         toolRuntime = ToolRuntime(capabilityRegistry, approvalEngine)
 
         providerRegistry = ProviderRegistry()
