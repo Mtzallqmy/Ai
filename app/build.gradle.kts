@@ -79,6 +79,7 @@ dependencies {
     implementation(project(":core:memory"))
     implementation(project(":core:workspace"))
     implementation(project(":core:sandbox"))
+    implementation(project(":core:workflow"))
     implementation(project(":native:runtime-rust"))
     implementation(project(":native:local-llm"))
     implementation(project(":feature:chat"))

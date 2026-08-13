@@ -39,6 +39,7 @@ include(":core:capabilities")
 include(":core:memory")
 include(":core:workspace")
 include(":core:sandbox")
+include(":core:workflow")
 
 // Native security runtime
 include(":native:runtime-rust")
