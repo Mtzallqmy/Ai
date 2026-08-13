@@ -140,13 +140,6 @@ class AegisApp : Application() {
         }
         graphAgentEngine.interruptBefore = setOf("review")
 
-        val agentTools: MutableList<com.mtzallqmy.aiagent.tools.AgentTool<*, *>> = mutableListOf()
-        agentTools.addAll(FileToolSet(this, workspaceManager).tools)
-        agentTools.addAll(HttpToolSet().tools)
-        agentTools.addAll(ClipboardToolSet(this).tools)
-        agentTools.addAll(DeviceToolSet(this).tools)
-        agentTools.addAll(SshToolSet().tools)
-
         runtime = AgentRuntime(
             provider = providerRegistry.select("openai"),
             toolRuntime = toolRuntime,

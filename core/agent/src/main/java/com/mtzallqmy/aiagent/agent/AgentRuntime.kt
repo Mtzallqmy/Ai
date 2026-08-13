@@ -3,7 +3,7 @@ package com.mtzallqmy.aiagent.agent
 import com.mtzallqmy.aiagent.common.AgentException
 import com.mtzallqmy.aiagent.model.*
 import com.mtzallqmy.aiagent.providers.AiProvider
-import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolContext
 
 import com.mtzallqmy.aiagent.tools.ToolRuntime
@@ -56,7 +56,7 @@ class AgentRuntime(
     }
 
     /** Execute a full multi-step agent run with real tool calling. */
-    fun runTask(task: String, modelId: String, agentId: String = "main", tools: List<AgentTool<Any, Any>>) {
+    fun runTask(task: String, modelId: String, agentId: String = "main", tools: List<RegisteredTool>) {
         if (isRunning()) return
         val runId = java.util.UUID.randomUUID().toString()
         val runRecord = AgentRun(runId, agentId, provider.providerId, modelId, System.currentTimeMillis())
@@ -83,7 +83,7 @@ class AgentRuntime(
         _state.value = AgentState.CANCELLED
     }
 
-    private suspend fun runLoop(task: String, modelId: String, runRecord: AgentRun, tools: List<AgentTool<Any, Any>>) {
+    private suspend fun runLoop(task: String, modelId: String, runRecord: AgentRun, tools: List<RegisteredTool>) {
         _state.value = AgentState.THINKING
         appendTimeline(runRecord.runId, "Planning")
         val contextManager = ContextManager(contextWindow = providerModelContextWindow(modelId))
@@ -237,7 +237,7 @@ class AgentRuntime(
      * observable execution state for the agent UI and persisted run record.
      */
     private suspend fun executeTool(
-        tool: AgentTool<Any, Any>, arguments: String, runRecord: AgentRun,
+        tool: RegisteredTool, arguments: String, runRecord: AgentRun,
     ): ToolResultEnvelope {
         _state.value = AgentState.WAITING_FOR_TOOL
         return toolRuntime.execute(

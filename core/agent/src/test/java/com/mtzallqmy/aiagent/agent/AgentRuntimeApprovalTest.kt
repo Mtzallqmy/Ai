@@ -12,6 +12,7 @@ import com.mtzallqmy.aiagent.model.ToolDescriptor
 import com.mtzallqmy.aiagent.providers.AiProvider
 import com.mtzallqmy.aiagent.tools.AgentTool
 import com.mtzallqmy.aiagent.tools.ApprovalEngine
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import com.mtzallqmy.aiagent.tools.ToolRuntime
@@ -38,7 +39,7 @@ class AgentRuntimeApprovalTest {
             toolRuntime = ToolRuntime(CapabilityRegistry(), approvalEngine),
         )
 
-        runtime.runTask("use the tool", "test-model", tools = listOf(tool))
+        runtime.runTask("use the tool", "test-model", tools = listOf(registered(tool)))
 
         val request = withTimeout(2_000) { approvalEngine.requests.receive() }
         assertEquals(AgentState.WAITING_FOR_APPROVAL, runtime.state.value)
@@ -60,7 +61,7 @@ class AgentRuntimeApprovalTest {
             toolRuntime = ToolRuntime(CapabilityRegistry(), approvalEngine),
         )
 
-        runtime.runTask("use the tool", "test-model", tools = listOf(tool))
+        runtime.runTask("use the tool", "test-model", tools = listOf(registered(tool)))
 
         withTimeout(2_000) { runtime.state.first { it == AgentState.WAITING_FOR_APPROVAL } }
         approvalEngine.requests.receive()
@@ -111,4 +112,7 @@ class AgentRuntimeApprovalTest {
             return "ok"
         }
     }
+
+    private fun registered(tool: CountingTool) =
+        RegisteredTool.typed(tool, kotlinx.serialization.json.JsonObject.serializer())
 }

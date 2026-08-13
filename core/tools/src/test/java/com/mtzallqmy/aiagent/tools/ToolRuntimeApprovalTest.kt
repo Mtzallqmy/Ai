@@ -22,7 +22,7 @@ class ToolRuntimeApprovalTest {
     fun `ASK does not execute before decision`() = runTest {
         val engine = ApprovalEngine { ApprovalPolicy.ASK_EVERY_TIME }
         val tool = CountingTool()
-        val execution = async { runtime(engine).execute(tool, "{}", context, "run-ask") }
+        val execution = async { runtime(engine).execute(registered(tool), "{}", context, "run-ask") }
 
         val request = engine.requests.receive()
         runCurrent()
@@ -39,7 +39,7 @@ class ToolRuntimeApprovalTest {
         val engine = ApprovalEngine { ApprovalPolicy.ALLOW }
         val tool = CountingTool()
 
-        val result = runtime(engine).execute(tool, "{}", context, "run-allow")
+        val result = runtime(engine).execute(registered(tool), "{}", context, "run-allow")
 
         assertTrue(result.success)
         assertEquals(1, tool.executionCount)
@@ -51,7 +51,7 @@ class ToolRuntimeApprovalTest {
         val engine = ApprovalEngine { ApprovalPolicy.DENY }
         val tool = CountingTool()
 
-        val result = runtime(engine).execute(tool, "{}", context, "run-deny")
+        val result = runtime(engine).execute(registered(tool), "{}", context, "run-deny")
 
         assertFalse(result.success)
         assertEquals(ToolErrorCategory.APPROVAL_REQUIRED, result.errorCategory)
@@ -63,7 +63,7 @@ class ToolRuntimeApprovalTest {
     fun `one tool call emits one approval request`() = runTest {
         val engine = ApprovalEngine { ApprovalPolicy.ASK_EVERY_TIME }
         val tool = CountingTool()
-        val execution = async { runtime(engine).execute(tool, "{}", context, "run-single-request") }
+        val execution = async { runtime(engine).execute(registered(tool), "{}", context, "run-single-request") }
 
         val request = engine.requests.receive()
         assertNull(engine.requests.tryReceive().getOrNull())
@@ -78,7 +78,7 @@ class ToolRuntimeApprovalTest {
     fun `cancellation while waiting removes pending request and never executes`() = runTest {
         val engine = ApprovalEngine { ApprovalPolicy.ASK_EVERY_TIME }
         val tool = CountingTool()
-        val execution = async { runtime(engine).execute(tool, "{}", context, "run-cancel") }
+        val execution = async { runtime(engine).execute(registered(tool), "{}", context, "run-cancel") }
 
         engine.requests.receive()
         assertEquals(1, engine.pendingCount)
@@ -90,6 +90,9 @@ class ToolRuntimeApprovalTest {
     }
 
     private fun runtime(engine: ApprovalEngine) = ToolRuntime(CapabilityRegistry(), engine)
+
+    private fun registered(tool: CountingTool) =
+        RegisteredTool.typed(tool, kotlinx.serialization.json.JsonObject.serializer())
 
     private class CountingTool : AgentTool<Any, Any> {
         var executionCount = 0

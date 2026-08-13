@@ -4,13 +4,13 @@ import android.content.Context
 import com.mtzallqmy.aiagent.model.CapabilityId
 import com.mtzallqmy.aiagent.model.*
 import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import com.mtzallqmy.aiagent.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.Serializable
 import java.io.File
 
 /**
@@ -22,20 +22,29 @@ class FileToolSet(
     context: Context,
     private val workspace: WorkspaceManager = WorkspaceManager(context),
 ) {
-    val tools: List<AgentTool<Any, Any>> = listOf(
-        FileReadTool(workspace),
-        FileWriteTool(workspace),
-        FileAppendTool(workspace),
-        FileListTool(workspace),
-        FileInfoTool(workspace),
-        FileDeleteTool(workspace),
+    val tools: List<RegisteredTool> = listOf(
+        RegisteredTool.typed(FileReadTool(workspace), FilePathInput.serializer()),
+        RegisteredTool.typed(FileWriteTool(workspace), FileContentInput.serializer()),
+        RegisteredTool.typed(FileAppendTool(workspace), FileContentInput.serializer()),
+        RegisteredTool.typed(FileListTool(workspace), FileListInput.serializer()),
+        RegisteredTool.typed(FileInfoTool(workspace), FilePathInput.serializer()),
+        RegisteredTool.typed(FileDeleteTool(workspace), FilePathInput.serializer()),
     )
 }
 
-private abstract class FileBaseTool(
+@Serializable
+data class FilePathInput(val path: String)
+
+@Serializable
+data class FileContentInput(val path: String, val content: String)
+
+@Serializable
+data class FileListInput(val path: String = ".")
+
+private abstract class FileBaseTool<I : Any>(
     override val descriptor: ToolDescriptor,
     protected val workspace: WorkspaceManager,
-) : AgentTool<Any, Any> {
+) : AgentTool<I, ToolResultEnvelope> {
 
     override suspend fun availability(context: ToolContext): ToolAvailability {
         return try {
@@ -47,15 +56,7 @@ private abstract class FileBaseTool(
         }
     }
 
-    protected fun pathOf(input: Any): String =
-        (input as? JsonObject)?.get("path")?.jsonPrimitive?.content
-            ?: (input as? String)?.ifBlank { null }
-            ?: error("path required")
-
-    protected fun jsonArgs(input: Any): JsonObject =
-        input as? JsonObject ?: JsonObject(mapOf("path" to kotlinx.serialization.json.JsonPrimitive(input.toString())))
-
-    suspend fun realExecute(workspaceId: String, body: suspend () -> String): ToolResultEnvelope {
+    suspend fun realExecute(body: suspend () -> String): ToolResultEnvelope {
         val start = System.currentTimeMillis()
         return try {
             val out = withContext(Dispatchers.IO) { body() }
@@ -73,7 +74,7 @@ private abstract class FileBaseTool(
     }
 }
 
-private class FileReadTool(workspace: WorkspaceManager) : FileBaseTool(
+private class FileReadTool(workspace: WorkspaceManager) : FileBaseTool<FilePathInput>(
     ToolDescriptor(
         id = "file.read", displayName = "Read File", description = "Read the content of a file inside the current workspace",
         inputSchema = """{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}""",
@@ -81,13 +82,12 @@ private class FileReadTool(workspace: WorkspaceManager) : FileBaseTool(
         requiredCapabilities = setOf(CapabilityId("workspace")), timeoutMs = 10_000L,
     ), workspace
 ) {
-    override suspend fun execute(input: Any, context: ToolContext): Any {
-        val path = pathOf(input)
-        return realExecute(context.workspaceId) { workspace.readFile(context.workspaceId, path) }
+    override suspend fun execute(input: FilePathInput, context: ToolContext): ToolResultEnvelope {
+        return realExecute { workspace.readFile(context.workspaceId, input.path) }
     }
 }
 
-private class FileWriteTool(workspace: WorkspaceManager) : FileBaseTool(
+private class FileWriteTool(workspace: WorkspaceManager) : FileBaseTool<FileContentInput>(
     ToolDescriptor(
         id = "file.write", displayName = "Write File", description = "Write content to a file inside the current workspace",
         inputSchema = """{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}""",
@@ -95,18 +95,15 @@ private class FileWriteTool(workspace: WorkspaceManager) : FileBaseTool(
         requiredCapabilities = setOf(CapabilityId("workspace")), timeoutMs = 15_000L,
     ), workspace
 ) {
-    override suspend fun execute(input: Any, context: ToolContext): Any {
-        val args = jsonArgs(input)
-        val path = pathOf(input)
-        val content = args["content"]?.jsonPrimitive?.content ?: error("content required")
-        return realExecute(context.workspaceId) {
-            workspace.writeFile(context.workspaceId, path, content)
-            "Wrote ${content.length} chars to $path"
+    override suspend fun execute(input: FileContentInput, context: ToolContext): ToolResultEnvelope {
+        return realExecute {
+            workspace.writeFile(context.workspaceId, input.path, input.content)
+            "Wrote ${input.content.length} chars to ${input.path}"
         }
     }
 }
 
-private class FileAppendTool(workspace: WorkspaceManager) : FileBaseTool(
+private class FileAppendTool(workspace: WorkspaceManager) : FileBaseTool<FileContentInput>(
     ToolDescriptor(
         id = "file.append", displayName = "Append File", description = "Append content to a file inside the current workspace",
         inputSchema = """{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}""",
@@ -114,18 +111,15 @@ private class FileAppendTool(workspace: WorkspaceManager) : FileBaseTool(
         requiredCapabilities = setOf(CapabilityId("workspace")), timeoutMs = 15_000L,
     ), workspace
 ) {
-    override suspend fun execute(input: Any, context: ToolContext): Any {
-        val args = jsonArgs(input)
-        val path = pathOf(input)
-        val content = args["content"]?.jsonPrimitive?.content ?: error("content required")
-        return realExecute(context.workspaceId) {
-            workspace.appendFile(context.workspaceId, path, content)
-            "Appended ${content.length} chars to $path"
+    override suspend fun execute(input: FileContentInput, context: ToolContext): ToolResultEnvelope {
+        return realExecute {
+            workspace.appendFile(context.workspaceId, input.path, input.content)
+            "Appended ${input.content.length} chars to ${input.path}"
         }
     }
 }
 
-private class FileListTool(workspace: WorkspaceManager) : FileBaseTool(
+private class FileListTool(workspace: WorkspaceManager) : FileBaseTool<FileListInput>(
     ToolDescriptor(
         id = "file.list", displayName = "List Files", description = "List files in a workspace directory",
         inputSchema = """{"type":"object","properties":{"path":{"type":"string"}}}""",
@@ -133,15 +127,14 @@ private class FileListTool(workspace: WorkspaceManager) : FileBaseTool(
         requiredCapabilities = setOf(CapabilityId("workspace")), timeoutMs = 10_000L,
     ), workspace
 ) {
-    override suspend fun execute(input: Any, context: ToolContext): Any {
-        val path = pathOf(input).ifEmpty { "." }
-        return realExecute(context.workspaceId) {
-            workspace.listFiles(context.workspaceId, path).joinToString("\n").ifBlank { "(empty directory)" }
+    override suspend fun execute(input: FileListInput, context: ToolContext): ToolResultEnvelope {
+        return realExecute {
+            workspace.listFiles(context.workspaceId, input.path).joinToString("\n").ifBlank { "(empty directory)" }
         }
     }
 }
 
-private class FileInfoTool(workspace: WorkspaceManager) : FileBaseTool(
+private class FileInfoTool(workspace: WorkspaceManager) : FileBaseTool<FilePathInput>(
     ToolDescriptor(
         id = "file.info", displayName = "File Info", description = "Get file metadata (size, last modified, type)",
         inputSchema = """{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}""",
@@ -149,10 +142,9 @@ private class FileInfoTool(workspace: WorkspaceManager) : FileBaseTool(
         requiredCapabilities = setOf(CapabilityId("workspace")), timeoutMs = 10_000L,
     ), workspace
 ) {
-    override suspend fun execute(input: Any, context: ToolContext): Any {
-        val path = pathOf(input)
-        return realExecute(context.workspaceId) {
-            val file = workspace.workspace(context.workspaceId).resolve(path)
+    override suspend fun execute(input: FilePathInput, context: ToolContext): ToolResultEnvelope {
+        return realExecute {
+            val file = workspace.workspace(context.workspaceId).resolve(input.path)
             buildString {
                 appendLine("name=${file.name}")
                 appendLine("isDirectory=${file.isDirectory}")
@@ -163,7 +155,7 @@ private class FileInfoTool(workspace: WorkspaceManager) : FileBaseTool(
     }
 }
 
-private class FileDeleteTool(workspace: WorkspaceManager) : FileBaseTool(
+private class FileDeleteTool(workspace: WorkspaceManager) : FileBaseTool<FilePathInput>(
     ToolDescriptor(
         id = "file.delete", displayName = "Delete File", description = "Delete a file inside the current workspace",
         inputSchema = """{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}""",
@@ -171,11 +163,10 @@ private class FileDeleteTool(workspace: WorkspaceManager) : FileBaseTool(
         requiredCapabilities = setOf(CapabilityId("workspace")), timeoutMs = 10_000L,
     ), workspace
 ) {
-    override suspend fun execute(input: Any, context: ToolContext): Any {
-        val path = pathOf(input)
-        return realExecute(context.workspaceId) {
-            val file = workspace.workspace(context.workspaceId).resolve(path)
-            "deleted=${file.deleteRecursively()} path=$path"
+    override suspend fun execute(input: FilePathInput, context: ToolContext): ToolResultEnvelope {
+        return realExecute {
+            val file = workspace.workspace(context.workspaceId).resolve(input.path)
+            "deleted=${file.deleteRecursively()} path=${input.path}"
         }
     }
 }
