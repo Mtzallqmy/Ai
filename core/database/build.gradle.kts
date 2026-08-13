@@ -1,0 +1,40 @@
+plugins {
+    id("com.android.library") version "8.5.2"
+    alias(libs.plugins.kotlin.android)
+    id("com.google.devtools.ksp") version "1.9.24-1.0.20"
+}
+
+android {
+    namespace = "com.mtzallqmy.aiagent.core.database"
+    compileSdk = 34
+
+    defaultConfig {
+        minSdk = 26
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles("consumer-rules.pro")
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    implementation(libs.androidx.room.testing)
+    ksp(libs.androidx.room.compiler)
+    implementation(project(":core:model"))
+    testImplementation(libs.junit)
+
+android {
+    publishing {
+        singleVariant("debug")
+    }
+}
+
+}
