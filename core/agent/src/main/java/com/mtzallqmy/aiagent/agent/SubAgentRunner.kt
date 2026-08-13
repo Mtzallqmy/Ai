@@ -13,6 +13,7 @@ import com.mtzallqmy.aiagent.tools.TypedToolRegistry
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -217,6 +218,7 @@ class SubAgentRunner(
     suspend fun cancel(agentId: String): Boolean {
         val running = lock.withLock { active[agentId] } ?: return false
         running.runtime.cancel()
+        running.job.cancel(CancellationException("Sub-agent cancelled by parent"))
         return true
     }
 
@@ -224,6 +226,7 @@ class SubAgentRunner(
         val children = lock.withLock { active.values.filter { it.spec.parentRunId == parentRunId } }
         children.forEach {
             it.runtime.cancel()
+            it.job.cancel(CancellationException("Sub-agent parent run cancelled"))
         }
         return children.size
     }
@@ -271,7 +274,7 @@ class SubAgentRunner(
                 startedAt,
                 memoryPersisted = false,
             )
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        } catch (cancelled: CancellationException) {
             started.complete(Unit)
             runtime.cancel()
             val record = runtime.run.value
