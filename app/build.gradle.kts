@@ -92,6 +92,7 @@ dependencies {
     implementation(project(":feature:security"))
     implementation(project(":feature:settings"))
     implementation(project(":feature:logs"))
+    implementation(project(":feature:schedules"))
     implementation(project(":tool:android"))
     implementation(project(":tool:filesystem"))
     implementation(project(":tool:terminal"))

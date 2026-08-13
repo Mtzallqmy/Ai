@@ -56,6 +56,7 @@ include(":feature:files")
 include(":feature:security")
 include(":feature:settings")
 include(":feature:logs")
+include(":feature:schedules")
 
 // Tool modules
 include(":tool:android")

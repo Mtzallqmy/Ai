@@ -34,6 +34,9 @@ import com.mtzallqmy.aiagent.security.CredentialVault
 import com.mtzallqmy.aiagent.sandbox.ProotLinuxBackend
 import com.mtzallqmy.aiagent.sandbox.SandboxBackendRegistry
 import com.mtzallqmy.aiagent.sandbox.termux.AndroidTermuxCommandTransport
+import com.mtzallqmy.aiagent.schedules.ScheduleExecutionHost
+import com.mtzallqmy.aiagent.schedules.ScheduleRuntime
+import com.mtzallqmy.aiagent.schedules.ScheduleRuntimeOwner
 import com.mtzallqmy.aiagent.tool.clipboard.ClipboardToolSet
 import com.mtzallqmy.aiagent.tool.filesystem.FileToolSet
 import com.mtzallqmy.aiagent.tool.http.HttpToolSet
@@ -45,12 +48,20 @@ import com.mtzallqmy.aiagent.tools.ToolRuntime
 import com.mtzallqmy.aiagent.tools.TypedToolRegistry
 import com.mtzallqmy.aiagent.workspace.WorkspaceManager
 import java.io.File
+import com.mtzallqmy.aiagent.workflow.AtomicFileWorkflowStore
+import com.mtzallqmy.aiagent.workflow.WorkflowEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Minimal composition root: wires all registered implementations.
  * No hardcoded keys — credentials only enter at runtime via Settings/CredentialVault.
  */
-class AegisApp : Application() {
+class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
+
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     lateinit var databaseProvider: DatabaseProvider
         private set
@@ -73,6 +84,10 @@ class AegisApp : Application() {
     lateinit var smartRouter: SmartRoutingProvider
         private set
     lateinit var sandboxBackendRegistry: SandboxBackendRegistry
+        private set
+    lateinit var workflowEngine: WorkflowEngine
+        private set
+    override lateinit var scheduleRuntime: ScheduleRuntime
         private set
     lateinit var runtime: AgentRuntime
         private set
@@ -201,9 +216,32 @@ class AegisApp : Application() {
         }
         graphAgentEngine.interruptBefore = setOf("review")
 
+        workflowEngine = WorkflowEngine(
+            store = AtomicFileWorkflowStore(File(noBackupFilesDir, "workflows/state.json")),
+            actionExecutor = AppWorkflowActionExecutor(
+                context = this,
+                providers = providerRegistry,
+                tools = toolRegistry,
+                toolRuntime = toolRuntime,
+                approvalEngine = approvalEngine,
+            ),
+            scope = applicationScope,
+        )
+        scheduleRuntime = ScheduleRuntime(this)
+        applicationScope.launch {
+            workflowEngine.recoverIncompleteRuns()
+        }
+
         runtime = AgentRuntime(
             provider = smartRouter,
             toolRuntime = toolRuntime,
         )
     }
+
+    override suspend fun executeScheduledWorkflow(
+        workflowId: String,
+        workflowVersion: Int,
+        input: kotlinx.serialization.json.JsonObject,
+        scheduleId: String,
+    ): String = workflowEngine.startStored(workflowId, workflowVersion, input)
 }

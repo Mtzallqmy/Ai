@@ -15,7 +15,12 @@ interface AgentTool<I : Any, O : Any> {
     suspend fun execute(input: I, context: ToolContext): O
 }
 
-data class ToolContext(val runId: String, val workspaceId: String)
+data class ToolContext(
+    val runId: String,
+    val workspaceId: String,
+    /** Stable key for crash-retry deduplication when the calling workflow provides one. */
+    val idempotencyKey: String? = null,
+)
 
 sealed class ToolAvailability {
     data object Available : ToolAvailability()

@@ -59,6 +59,7 @@ data class AgentNode(
     val providerId: String? = null,
     val modelId: String? = null,
     val prompt: String,
+    val toolIds: Set<String> = emptySet(),
     override val timeoutMillis: Long = 10 * 60_000,
     override val retry: RetryPolicy = RetryPolicy(maxAttempts = 2),
 ) : WorkflowNode
