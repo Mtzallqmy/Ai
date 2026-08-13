@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import com.mtzallqmy.aiagent.common.SecretSanitizer
 import java.util.UUID
 
 /**
@@ -33,6 +34,11 @@ class MemoryStore(private val database: () -> Any) {
         score: Double = 0.5,
         expiresAtMs: Long? = null,
     ) {
+        // HARDENING: never persist secrets into memory. Reject values that
+        // look like API keys, JWTs, bearer tokens, or private key material.
+        if (SecretSanitizer.containsSecret(value)) {
+            throw IllegalArgumentException("Refusing to store value containing a detected secret in memory")
+        }
         db().memoryDao().upsert(MemoryEntity(
             id = UUID.randomUUID().toString(),
             namespace = namespace,

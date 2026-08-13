@@ -3,12 +3,21 @@ package com.mtzallqmy.aiagent
 import android.app.Application
 import com.mtzallqmy.aiagent.agent.AgentRuntime
 import com.mtzallqmy.aiagent.agent.ContextManager
+import com.mtzallqmy.aiagent.agent.GraphAgentEngine
+import com.mtzallqmy.aiagent.agent.HeartbeatAgent
 import com.mtzallqmy.aiagent.agent.ProviderRegistry
 import com.mtzallqmy.aiagent.agent.SkillRegistry
+import com.mtzallqmy.aiagent.agent.backends.DeviceBackend
+import com.mtzallqmy.aiagent.agent.backends.DeviceBackendRegistry
+import com.mtzallqmy.aiagent.agent.backends.CodingBackend
 import com.mtzallqmy.aiagent.capabilities.CapabilityRegistry
 import com.mtzallqmy.aiagent.datastore.SecureSettings
 import com.mtzallqmy.aiagent.database.DatabaseProvider
 import com.mtzallqmy.aiagent.feature.device.DeviceToolSet
+import com.mtzallqmy.aiagent.memory.DocumentIngestor
+import com.mtzallqmy.aiagent.memory.InMemoryVectorStore
+import com.mtzallqmy.aiagent.memory.KeywordEmbedder
+import com.mtzallqmy.aiagent.memory.MemoryRefiner
 import com.mtzallqmy.aiagent.memory.MemoryStore
 import com.mtzallqmy.aiagent.provider.anthropic.AnthropicProvider
 import com.mtzallqmy.aiagent.provider.compatible.OpenAiCompatibleProvider
@@ -55,6 +64,18 @@ class AegisApp : Application() {
         private set
     lateinit var skillRegistry: SkillRegistry
         private set
+    lateinit var deviceBackendRegistry: DeviceBackendRegistry
+        private set
+    lateinit var heartbeatAgent: HeartbeatAgent
+        private set
+    lateinit var memoryRefiner: MemoryRefiner
+        private set
+    lateinit var documentIngestor: DocumentIngestor
+        private set
+    lateinit var codingBackend: CodingBackend
+        private set
+    lateinit var graphAgentEngine: GraphAgentEngine<Any>
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -94,6 +115,30 @@ class AegisApp : Application() {
         workspaceManager = WorkspaceManager(this)
         skillRegistry = SkillRegistry()
 
+        // Phase 5 integrations (studied reference repos, clean-room implementations)
+        val vectorStore = InMemoryVectorStore()
+        val embedder = KeywordEmbedder()
+        memoryRefiner = MemoryRefiner()
+        documentIngestor = DocumentIngestor(vectorStore, embedder)
+        heartbeatAgent = HeartbeatAgent()
+
+        // Device backends: Accessibility (on-device) + ADB (optional, requires PC pairing)
+        deviceBackendRegistry = DeviceBackendRegistry()
+        deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AccessibilityDeviceBackend())
+        deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AdbDeviceBackend())
+
+        codingBackend = com.mtzallqmy.aiagent.tool.terminal.LocalSandboxCoding()
+
+        // Minimal proof-of-concept graph: plan -> execute -> review with interrupt at review
+        graphAgentEngine = GraphAgentEngine(entryNode = "plan") { nodeId, state ->
+            when (nodeId) {
+                "plan" -> GraphAgentEngine.GraphNextStep.Goto("execute", state)
+                "execute" -> GraphAgentEngine.GraphNextStep.Goto("review", state)
+                else -> GraphAgentEngine.GraphNextStep.End(state)
+            }
+        }
+        graphAgentEngine.interruptBefore = setOf("review")
+
         val agentTools: MutableList<com.mtzallqmy.aiagent.tools.AgentTool<*, *>> = mutableListOf()
         agentTools.addAll(FileToolSet(this, workspaceManager).tools)
         agentTools.addAll(HttpToolSet().tools)
@@ -104,6 +149,7 @@ class AegisApp : Application() {
         runtime = AgentRuntime(
             provider = providerRegistry.select("openai"),
             toolRuntime = toolRuntime,
+            approvalEngine = approvalEngine,
         )
     }
 }

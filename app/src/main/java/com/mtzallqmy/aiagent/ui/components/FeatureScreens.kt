@@ -197,4 +197,5 @@ private fun describe(state: CapabilityAvailabilityState): String = when (state) 
     CapabilityAvailabilityState.DEVICE_UNSUPPORTED -> "Device unsupported"
     CapabilityAvailabilityState.CONFIGURATION_REQUIRED -> "Configuration required"
     CapabilityAvailabilityState.SECURITY_DENIED -> "Security denied"
+    CapabilityAvailabilityState.DEGRADED -> "Degraded"
 }

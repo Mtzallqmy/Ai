@@ -36,6 +36,8 @@ android {
     implementation(project(":core:model"))
     implementation(project(":core:ui"))
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.squareup.okhttp)
+    implementation(libs.squareup.okhttp.logging)
 
 android {
     publishing {

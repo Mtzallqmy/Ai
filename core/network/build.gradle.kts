@@ -27,6 +27,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.squareup.okhttp)
     implementation(libs.squareup.okhttp.logging)
+    implementation(libs.kotlinx.serialization.json)
     implementation(project(":core:common"))
     implementation(project(":core:model"))
 

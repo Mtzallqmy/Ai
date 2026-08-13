@@ -15,18 +15,39 @@ import android.view.accessibility.AccessibilityNodeInfo
  * bounds, clickable/editable/focusable/scrollable/enabled/checked/selected.
  */
 class AccessibilityAgentService : AccessibilityService() {
+    companion object {
+        @Volatile
+        private var currentInstance: AccessibilityAgentService? = null
+        /** Static accessor for backend discovery and health checks. */
+        fun current(): AccessibilityAgentService? = currentInstance
+    }
 
-    /** Latest observed tree snapshot, updated on accessibility events. */
+    override fun onCreate() {
+        super.onCreate()
+        currentInstance = this
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (currentInstance === this) currentInstance = null
+    }
+
+    /** Latest observed tree snapshot, updated on accessibility events (versioned). */
     @Volatile
-    private var latestRoot: AccessibilityNodeInfo? = null
+    private var latestSnapshot: Snapshot = Snapshot(0L, null)
 
-    fun currentTreeRoot(): AccessibilityNodeInfo? =
-        rootInActiveWindow
+    /** Versioned snapshot so callers can detect stale state after actions. */
+    data class Snapshot(val version: Long, val root: UiNode?)
 
-    /** Convert the live window tree into an internal node model. */
-    fun captureTree(): UiNode? {
-        val root = currentTreeRoot() ?: return null
-        return parseNode(root)
+    fun currentTreeRoot(): AccessibilityNodeInfo? = rootInActiveWindow
+    fun latestSnapshot(): Snapshot = latestSnapshot
+
+    /** Convert the live window tree into an internal node model (versioned). */
+    fun captureTree(): Snapshot {
+        val root = rootInActiveWindow?.let { parseNode(it) }
+        val next = Snapshot(System.currentTimeMillis(), root)
+        latestSnapshot = next
+        return next
     }
 
     private fun parseNode(node: AccessibilityNodeInfo): UiNode {
@@ -98,7 +119,7 @@ class AccessibilityAgentService : AccessibilityService() {
         return false
     }
 
-    fun scrollUp(): Boolean = currentTreeRoot()?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) == true
+    fun scrollUp(): Boolean = currentTreeRoot()?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) == true
 
     fun scrollDown(): Boolean = currentTreeRoot()?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) == true
 
@@ -128,6 +149,11 @@ class AccessibilityAgentService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event?.source?.recycle()
+        // Keep a fresh snapshot available so actions can observe state right
+        // before and after an operation (verification loop input).
+        if (rootInActiveWindow != null) {
+            runCatching { latestSnapshot = Snapshot(System.currentTimeMillis(), parseNode(rootInActiveWindow!!)) }
+        }
     }
 
     override fun onInterrupt() {}

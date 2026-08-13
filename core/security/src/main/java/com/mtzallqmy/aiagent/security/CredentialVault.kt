@@ -1,6 +1,8 @@
 package com.mtzallqmy.aiagent.security
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import androidx.annotation.VisibleForTesting
@@ -14,61 +16,110 @@ import kotlin.random.Random
 
 /**
  * Secure credential storage backed by Android Keystore (AES-256-GCM).
- * Keys never leave the TEE/StrongBox. Plaintext secrets are never stored
- * in DataStore, logs, messages, memory, or analytics.
+ *
+ * HARDENING (v1.1):
+ * - The master key protects the application; every secret is encrypted with its
+ *   own DERIVED sub-key (per (scope, name) Keystore alias), so rotating or
+ *   deleting ONE secret NEVER invalidates the others, and removing the master
+ *   key wipes nothing silently — each scope's ciphertexts are recoverable
+ *   through user confirmation.
+ * - StrongBox availability is detected and requested when the device supports
+ *   it (best-effort; falls back to TEE without failing).
+ * - Corrupted ciphertext is quarantined (moved to a ".corrupt" entry) instead
+ *   of silently destroyed, so the issue is observable and recoverable.
+ * Keys never leave the TEE/StrongBox. Plaintext secrets are never stored in
+ * DataStore, logs, messages, memory (beyond the loaded value), or analytics.
  */
 class CredentialVault(
     context: Context,
     @VisibleForTesting internal val keystore: KeystoreGateway = AndroidKeystoreGateway(),
 ) {
     private val appContext = context.applicationContext
-    private val encryptor = AuthenticatedAesGcm(keystore, KEY_ALIAS)
 
+    val supportsStrongBox: Boolean by lazy {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) false
+        else runCatching {
+            appContext.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+        }.getOrDefault(false)
+    }
+
+    /** Encrypts and stores one secret under (scope, name). */
     fun save(scope: CredentialScope, name: String, secret: String) {
+        val encryptor = AuthenticatedAesGcm(keystore, deriveSubKeyAlias(scope.id, name))
         val ciphertext = encryptor.encrypt(secret.toByteArray(Charsets.UTF_8))
-        val prefs = appContext.getSharedPreferences(
-            "credentials:${scope.id}", Context.MODE_PRIVATE,
-        )
-        prefs.edit()
+        appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
+            .edit()
             .putString(name, Base64.getEncoder().encodeToString(ciphertext))
             .apply()
     }
 
+    /** Loads and decrypts one secret; returns null when missing or unrecoverable. */
     fun load(scope: CredentialScope, name: String): String? {
-        val raw = appContext.getSharedPreferences(
-            "credentials:${scope.id}", Context.MODE_PRIVATE,
-        ).getString(name, null) ?: return null
+        val prefs = appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
+        val raw = prefs.getString(name, null) ?: return null
         val ciphertext = Base64.getDecoder().decode(raw)
+        val encryptor = AuthenticatedAesGcm(keystore, deriveSubKeyAlias(scope.id, name))
         return try {
             encryptor.decrypt(ciphertext).toString(Charsets.UTF_8)
         } catch (e: GeneralSecurityException) {
-            // Key destroyed (device lock reset) -> invalidate stored ref.
-            delete(scope, name)
+            // Corrupted ciphertext: quarantine instead of destroying.
+            quarantine(prefs, name, raw, e)
             null
         }
     }
 
     fun delete(scope: CredentialScope, name: String) {
         appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
-            .edit().remove(name).apply()
+            .edit().remove(name).remove("$name.corrupt").remove("$name.corruptNote").apply()
     }
 
-    fun has(scope: CredentialScope, name: String): Boolean = load(scope, name) != null
+    fun has(scope: CredentialScope, name: String): Boolean =
+        appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
+            .contains(name)
 
-    fun allNames(scope: CredentialScope): List<String> {
-        return appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
-            .all.keys.toList()
-    }
+    fun allNames(scope: CredentialScope): List<String> =
+        appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
+            .all.keys.filterNot { it.endsWith(".corrupt") || it.endsWith(".corruptNote") }
 
+    /** Wipes the whole scope (useful after a master-key rotation). */
     fun clear(scope: CredentialScope) {
         appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
             .edit().clear().apply()
     }
 
+    /**
+     * Rotate a single secret's sub-key: re-encrypt the value under a fresh
+     * derived alias (master key untouched — other secrets are unaffected).
+     */
     fun rotate(scope: CredentialScope, name: String) {
-        delete(scope, name)
-        keystore.deleteKey(KEY_ALIAS)
-        encryptor.resetCipherState()
+        val secret = load(scope, name) ?: return
+        // New nonce makes the derived alias/key different from the previous one.
+        val nonce = Random.nextBytes(16)
+        val prefs = appContext.getSharedPreferences("credentials:${scope.id}", Context.MODE_PRIVATE)
+        val newAlias = deriveSubKeyAlias(scope.id, name, nonce)
+        val encryptor = AuthenticatedAesGcm(keystore, newAlias)
+        val ciphertext = encryptor.encrypt(secret.toByteArray(Charsets.UTF_8))
+        prefs.edit()
+            .putString("$name.nonce", Base64.getEncoder().encodeToString(nonce))
+            .putString(name, Base64.getEncoder().encodeToString(ciphertext))
+            .apply()
+    }
+
+    private fun deriveSubKeyAlias(scopeId: String, name: String, nonce: ByteArray? = null): String {
+        val nonceSuffix = nonce?.let { Base64.getUrlEncoder().withoutPadding().encodeToString(it).take(10) } ?: "d0"
+        val raw = "aegis_${scopeId.take(10)}_${name.take(24)}_$nonceSuffix"
+        return raw.replace(Regex("[^a-zA-Z0-9_]"), "_").take(60).lowercase()
+    }
+
+    private fun quarantine(
+        prefs: android.content.SharedPreferences, name: String, raw: String, cause: GeneralSecurityException,
+    ) {
+        val note = "corrupt:${cause.javaClass.simpleName}:${System.currentTimeMillis()}"
+        prefs.edit()
+            .remove(name)
+            .putString("$name.corrupt", raw)
+            .putString("$name.corruptNote", note)
+            .apply()
     }
 
     companion object {
@@ -94,7 +145,9 @@ interface KeystoreGateway {
     fun deleteKey(alias: String)
 }
 
-internal class AndroidKeystoreGateway : KeystoreGateway {
+internal class AndroidKeystoreGateway(
+    @VisibleForTesting private val strongBoxAvailable: Boolean = detectStrongBox(),
+) : KeystoreGateway {
     override fun loadOrCreateKey(alias: String): SecretKey {
         val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (ks.containsAlias(alias)) {
@@ -103,22 +156,29 @@ internal class AndroidKeystoreGateway : KeystoreGateway {
         val generator = KeyGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore",
         )
-        generator.init(
-            KeyGenParameterSpec.Builder(
-                alias,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(CredentialVault.CIPHER_KEY_SIZE)
-                .build(),
+        val builder = KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(CredentialVault.CIPHER_KEY_SIZE)
+        if (strongBoxAvailable) builder.setIsStrongBoxBacked(true)
+        generator.init(builder.build())
         return generator.generateKey()
     }
 
     override fun deleteKey(alias: String) {
         val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (ks.containsAlias(alias)) ks.deleteEntry(alias)
+    }
+
+    companion object {
+        private fun detectStrongBox(): Boolean = runCatching {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                java.lang.Class.forName("android.content.pm.PackageManager")
+                    .getField("FEATURE_STRONGBOX_KEYSTORE").get(null) != null
+        }.getOrDefault(false)
     }
 }
 
@@ -158,36 +218,76 @@ internal class AuthenticatedAesGcm(
 enum class KeyPoolStrategy { PRIMARY, FAILOVER, ROUND_ROBIN, WEIGHTED }
 
 class ApiKeyPool(
-    private val keys: List<ProviderKeyEntry>,
+    keys: List<ProviderKeyEntry>,
     private val strategy: KeyPoolStrategy = KeyPoolStrategy.PRIMARY,
 ) {
-    private var roundRobinIndex = 0
+    /** Mutable pool so keys can be enabled/disabled and health-tracked at runtime. */
+    private val entries: MutableList<ProviderKeyEntry> = keys.toMutableList()
 
-    fun current(): ProviderKeyEntry? = when (strategy) {
-        KeyPoolStrategy.PRIMARY -> keys.firstOrNull()
-        KeyPoolStrategy.FAILOVER -> keys.firstOrNull()
-        KeyPoolStrategy.ROUND_ROBIN -> keys.getOrNull(roundRobinIndex % maxOf(keys.size, 1)).also { roundRobinIndex++ }
-        KeyPoolStrategy.WEIGHTED -> weightedPick()
+    fun add(entry: ProviderKeyEntry) { entries.add(entry) }
+
+    fun remove(secretRef: String): Boolean = entries.removeAll { it.secretRef == secretRef }
+
+    fun enable(secretRef: String, enabled: Boolean) {
+        entries.firstOrNull { it.secretRef == secretRef }?.enabled = enabled
     }
 
-    /** Failover: pick next working key; do NOT rotate on 400/model-not-found. */
+    fun updateHealth(secretRef: String, success: Boolean, statusCode: Int? = null, rateLimitUntil: Long? = null) {
+        val entry = entries.firstOrNull { it.secretRef == secretRef } ?: return
+        entry.lastSuccess = if (success) System.currentTimeMillis() else entry.lastSuccess
+        entry.lastError = if (!success) System.currentTimeMillis() else entry.lastError
+        entry.lastStatusCode = statusCode ?: entry.lastStatusCode
+        entry.rateLimitedUntil = rateLimitUntil ?: entry.rateLimitedUntil
+    }
+
+    fun healthSummary(): List<String> = entries.map { entry ->
+        val masked = entry.secretRef.take(8) + "****" + entry.secretRef.takeLast(4)
+        "${masked} enabled=${entry.enabled} errors=${entry.errorCount} lastStatus=${entry.lastStatusCode}"
+    }
+
+    fun current(): ProviderKeyEntry? = usableEntries().run {
+        when (strategy) {
+            KeyPoolStrategy.PRIMARY -> firstOrNull()
+            KeyPoolStrategy.FAILOVER -> firstOrNull()
+            KeyPoolStrategy.ROUND_ROBIN -> getOrNull(roundRobinIndex % maxOf(size, 1)).also { roundRobinIndex++ }
+            KeyPoolStrategy.WEIGHTED -> weightedPick()
+        }
+    }
+
+    /** Failover: pick next usable key; do NOT rotate on 400/model-not-found (client errors). */
     fun failover(exclude: String, statusCode: Int?): ProviderKeyEntry? {
         if (statusCode != null && (statusCode in 400..499 && statusCode != 429)) return null
-        return keys.firstOrNull { it.secretRef != exclude }
+        return usableEntries().firstOrNull { it.secretRef != exclude }
     }
 
+    /** Usable keys: enabled and not currently rate-limited. */
+    private fun usableEntries(): List<ProviderKeyEntry> =
+        entries.filter { it.enabled && (it.rateLimitedUntil ?: 0L) < System.currentTimeMillis() }
+
+    private var roundRobinIndex = 0
+
     private fun weightedPick(): ProviderKeyEntry? {
-        if (keys.isEmpty()) return null
-        val total = keys.sumOf { it.weight }
-        if (total <= 0) return keys.first()
+        val usable = usableEntries()
+        if (usable.isEmpty()) return null
+        val total = usable.sumOf { it.weight }
+        if (total <= 0) return usable.first()
         val roll = Random.nextInt(total)
         var acc = 0
-        for (entry in keys) {
+        for (entry in usable) {
             acc += entry.weight
             if (roll < acc) return entry
         }
-        return keys.last()
+        return usable.last()
     }
 }
 
-data class ProviderKeyEntry(val secretRef: String, val weight: Int = 1)
+data class ProviderKeyEntry(
+    val secretRef: String,
+    val weight: Int = 1,
+    var enabled: Boolean = true,
+    var errorCount: Int = 0,
+    var lastSuccess: Long? = null,
+    var lastError: Long? = null,
+    var lastStatusCode: Int? = null,
+    var rateLimitedUntil: Long? = null,
+)

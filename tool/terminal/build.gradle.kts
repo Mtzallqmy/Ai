@@ -31,6 +31,8 @@ dependencies {
     implementation(project(":core:capabilities"))
     implementation(project(":core:model"))
     implementation(project(":core:tools"))
+    implementation(project(":core:agent"))
+    implementation(libs.squareup.okhttp)
 
 android {
     publishing {

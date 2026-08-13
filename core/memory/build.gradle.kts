@@ -28,8 +28,12 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
+    implementation("org.jetbrains.kotlin:kotlin-test:1.9.24")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     implementation(project(":core:database"))
     implementation(project(":core:model"))
+    implementation(project(":core:common"))
+    implementation(libs.kotlinx.serialization.json)
 
 android {
     publishing {

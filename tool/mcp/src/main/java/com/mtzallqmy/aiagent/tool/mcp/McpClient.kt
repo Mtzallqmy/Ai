@@ -24,7 +24,15 @@ class McpClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val msgId = AtomicInteger(1)
 
+    /** HEALTH: server-reported capabilities after initialize. */
+    var serverCapabilities: JsonObject? = null
+        private set
+
     private var initialized = false
+    private var sessionId: String? = null
+
+    /** HEALTH/RECONNECT: whether the transport is currently healthy. */
+    val isHealthy: Boolean get() = initialized
 
     suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
         if (initialized) return@withContext true
@@ -36,13 +44,19 @@ class McpClient(
                 put("version", JsonPrimitive("1.0.0"))
             })
         })
-        val ok = result != null
+        val obj = result as? JsonObject
+        val ok = obj != null
         if (ok) {
+            // Store server capabilities + optional Mcp-Session-Id (streamable HTTP).
+            serverCapabilities = obj?.get("capabilities") as? JsonObject
             callRpc("notifications/initialized", null)
             initialized = true
         }
         ok
     }
+
+    /** HEALTH CHECK: lightweight ping via tools/list; returns false on any failure. */
+    suspend fun healthCheck(): Boolean = runCatching { listTools(); true }.getOrDefault(false)
 
     /** Discover remote tool descriptors. */
     suspend fun listTools(): List<McpToolDescriptor> = withContext(Dispatchers.IO) {
@@ -81,20 +95,40 @@ class McpClient(
             .url(serverUrl)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
-            .apply { headers.forEach { (k, v) -> header(k, v) } }
+            .apply {
+                headers.forEach { (k, v) -> header(k, v) }
+                sessionId?.let { header("Mcp-Session-Id", it) }
+            }
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
+                // Streamable HTTP: capture the Mcp-Session-Id for subsequent
+                // requests (one session per initialize).
+                resp.header("Mcp-Session-Id")?.let { sessionId = it }
+                val rawBody = resp.body?.string() ?: return null
+                if (rawBody.isBlank()) return null
+                // Accept either plain JSON or SSE (event: message) payloads.
+                val body = if (rawBody.trimStart().startsWith("event:")) {
+                    extractSseData(rawBody)
+                } else {
+                    rawBody.trim()
+                }
                 if (body.isBlank()) return null
-                val element = json.parseToJsonElement(body)
-                (element as? JsonObject)?.get("result") ?: element
+                runCatching { json.parseToJsonElement(body) }
+                    .getOrNull()?.let { (it as? JsonObject)?.get("result") ?: it }
             }
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun extractSseData(sse: String): String {
+        val dataLines = sse.lines()
+            .filter { it.startsWith("data:") }
+            .map { it.removePrefix("data:").trim() }
+        return if (dataLines.isEmpty()) "" else dataLines.last()
     }
 }
 

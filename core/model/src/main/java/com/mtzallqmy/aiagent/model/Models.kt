@@ -77,6 +77,7 @@ enum class CapabilityAvailabilityState {
     DEVICE_UNSUPPORTED,
     CONFIGURATION_REQUIRED,
     SECURITY_DENIED,
+    DEGRADED,
 }
 
 data class CapabilityStatus(
@@ -114,7 +115,7 @@ data class ApprovalDecision(
     val decision: ApprovalOption,
 )
 
-enum class ApprovalOption { ALLOW_ONCE, ALLOW_FOR_TASK, ALWAYS_ALLOW, DENY }
+enum class ApprovalOption { ALLOW_ONCE, ALLOW_FOR_TASK, ALWAYS_ALLOW, DENY, ASK }
 
 /** Tool result envelope with typed error distinction. */
 data class ToolResultEnvelope(
@@ -126,6 +127,20 @@ data class ToolResultEnvelope(
     val durationMs: Long,
     val isRetryable: Boolean = true,
     val errorCategory: ToolErrorCategory = ToolErrorCategory.GENERIC,
+    val artifacts: List<String> = emptyList(),
+    val metadata: Map<String, String> = emptyMap(),
+)
+
+/** Structured approval request payload presented to the human approval UI. */
+data class ApprovalRequestDetails(
+    val toolId: String,
+    val toolName: String,
+    val target: String,
+    val arguments: Map<String, String>,
+    val risk: RiskLevel,
+    val reason: String,
+    val runId: String,
+    val agentId: String,
 )
 
 enum class ToolErrorCategory {
