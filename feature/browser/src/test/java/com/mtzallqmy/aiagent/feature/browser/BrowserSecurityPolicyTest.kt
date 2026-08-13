@@ -6,11 +6,14 @@ import org.junit.Test
 
 class BrowserSecurityPolicyTest {
     @Test
-    fun `only web schemes and about blank are allowed`() {
+    fun `browser policy preserves strict main URL protections`() {
         assertTrue(BrowserSecurityPolicy.isAllowedUrl("https://example.com"))
-        assertTrue(BrowserSecurityPolicy.isAllowedUrl("http://127.0.0.1/test"))
         assertTrue(BrowserSecurityPolicy.isAllowedUrl("about:blank"))
 
+        assertFalse(BrowserSecurityPolicy.isAllowedUrl("http://example.com"))
+        assertFalse(BrowserSecurityPolicy.isAllowedUrl("http://127.0.0.1/test"))
+        assertFalse(BrowserSecurityPolicy.isAllowedUrl("https://127.0.0.1/admin"))
+        assertFalse(BrowserSecurityPolicy.isAllowedUrl("https://192.168.1.2"))
         assertFalse(BrowserSecurityPolicy.isAllowedUrl("file:///sdcard/private.txt"))
         assertFalse(BrowserSecurityPolicy.isAllowedUrl("javascript:alert(1)"))
         assertFalse(BrowserSecurityPolicy.isAllowedUrl("intent://settings"))

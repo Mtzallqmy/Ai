@@ -1,6 +1,5 @@
 package com.mtzallqmy.aiagent.feature.browser
 
-import java.net.URI
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -14,13 +13,8 @@ import kotlinx.serialization.json.put
 
 /** Pure policy helpers so browser security behavior is testable without WebView. */
 internal object BrowserSecurityPolicy {
-    private val allowedSchemes = setOf("http", "https")
-
-    fun isAllowedUrl(url: String): Boolean {
-        if (url == "about:blank") return true
-        val scheme = runCatching { URI(url).scheme?.lowercase() }.getOrNull() ?: return false
-        return scheme in allowedSchemes
-    }
+    /** Keep the production hardening boundary aligned with the stricter WebView URL policy. */
+    fun isAllowedUrl(url: String): Boolean = BrowserUrlPolicy.isAllowed(url)
 
     fun isSafeSelector(selector: String): Boolean =
         selector.isNotBlank() &&
