@@ -39,7 +39,7 @@ val buildRustRuntime by tasks.registering(Exec::class) {
         "-t", "x86_64",
         "--platform", "26",
         "-o", rustOutput.get().asFile.absolutePath,
-        "build", "--release",
+        "build", "--release", "--locked",
     )
 }
 
