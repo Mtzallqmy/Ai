@@ -2,7 +2,7 @@ package com.mtzallqmy.aiagent.feature.chat
 
 import com.mtzallqmy.aiagent.agent.AgentRuntime
 import com.mtzallqmy.aiagent.model.*
-import com.mtzallqmy.aiagent.tools.AgentTool
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,7 +31,7 @@ class ChatViewModel(
     private val _timeline = MutableStateFlow<List<RunTimelineEntry>>(emptyList())
     val timeline: StateFlow<List<RunTimelineEntry>> = _timeline
 
-    fun send(text: String, tools: List<AgentTool<Any, Any>>, modelId: String = "") {
+    fun send(text: String, tools: List<RegisteredTool>, modelId: String = "") {
         if (text.isBlank()) return
         _messages.value += ChatMessage(role = MessageRole.USER, content = text)
         _messages.value += ChatMessage(role = MessageRole.ASSISTANT, content = "")

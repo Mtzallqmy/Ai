@@ -12,6 +12,7 @@ import com.mtzallqmy.aiagent.model.ToolDescriptor
 import com.mtzallqmy.aiagent.providers.AiProvider
 import com.mtzallqmy.aiagent.tools.AgentTool
 import com.mtzallqmy.aiagent.tools.ApprovalEngine
+import com.mtzallqmy.aiagent.tools.RegisteredTool
 import com.mtzallqmy.aiagent.tools.ToolAvailability
 import com.mtzallqmy.aiagent.tools.ToolContext
 import com.mtzallqmy.aiagent.tools.ToolRuntime
@@ -38,7 +39,7 @@ class AgentRuntimeApprovalTest {
             toolRuntime = ToolRuntime(CapabilityRegistry(), approvalEngine),
         )
 
-        runtime.runTask("use the tool", "test-model", tools = listOf(tool))
+        runtime.runTask("use the tool", "test-model", tools = listOf(registered(tool)))
 
         val request = withTimeout(2_000) { approvalEngine.requests.receive() }
         assertEquals(AgentState.WAITING_FOR_APPROVAL, runtime.state.value)
@@ -60,7 +61,7 @@ class AgentRuntimeApprovalTest {
             toolRuntime = ToolRuntime(CapabilityRegistry(), approvalEngine),
         )
 
-        runtime.runTask("use the tool", "test-model", tools = listOf(tool))
+        runtime.runTask("use the tool", "test-model", tools = listOf(registered(tool)))
 
         withTimeout(2_000) { runtime.state.first { it == AgentState.WAITING_FOR_APPROVAL } }
         approvalEngine.requests.receive()
@@ -93,7 +94,7 @@ class AgentRuntimeApprovalTest {
         }
     }
 
-    private class CountingTool : AgentTool<Any, Any> {
+    private class CountingTool : AgentTool<kotlinx.serialization.json.JsonObject, Any> {
         var executionCount = 0
         override val descriptor = ToolDescriptor(
             id = "agent-counting-tool",
@@ -106,9 +107,12 @@ class AgentRuntimeApprovalTest {
 
         override suspend fun availability(context: ToolContext): ToolAvailability = ToolAvailability.Available
 
-        override suspend fun execute(input: Any, context: ToolContext): Any {
+        override suspend fun execute(input: kotlinx.serialization.json.JsonObject, context: ToolContext): Any {
             executionCount += 1
             return "ok"
         }
     }
+
+    private fun registered(tool: CountingTool) =
+        RegisteredTool.typed(tool, kotlinx.serialization.json.JsonObject.serializer())
 }

@@ -6,6 +6,7 @@ import com.mtzallqmy.aiagent.model.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.SerializationException
 
 /** Typed tool contract: primitive platform capability. */
 interface AgentTool<I : Any, O : Any> {
@@ -49,10 +50,10 @@ class ToolRuntime(
     /** Drops run-scoped approval grants when the owning agent run terminates. */
     fun clearApprovalScope(runId: String) = approvalEngine.clearRun(runId)
 
-    suspend fun registerAndList(tools: List<AgentTool<*, *>>) = tools
+    suspend fun registerAndList(tools: List<RegisteredTool>) = tools
 
     suspend fun execute(
-        tool: AgentTool<Any, Any>,
+        tool: RegisteredTool,
         input: Any,
         context: ToolContext,
         runId: String,
@@ -78,6 +79,25 @@ class ToolRuntime(
                 return failure(tool, "Tool input must be a JSON object",
                     ToolErrorCategory.GENERIC, isRetryable = false)
             }
+        }
+
+        // Kotlin Serialization is the mandatory boundary between validated JSON and execution.
+        val preparedCall = try {
+            tool.prepare(typedInput)
+        } catch (e: SerializationException) {
+            return failure(
+                tool,
+                "Invalid typed tool input: ${e.message?.take(200)}",
+                ToolErrorCategory.GENERIC,
+                isRetryable = false,
+            )
+        } catch (e: IllegalArgumentException) {
+            return failure(
+                tool,
+                "Invalid typed tool input: ${e.message?.take(200)}",
+                ToolErrorCategory.GENERIC,
+                isRetryable = false,
+            )
         }
 
         // 1. Budget
@@ -145,7 +165,7 @@ class ToolRuntime(
             attempt++
             val result = try {
                 withTimeout(tool.descriptor.timeoutMs) {
-                    val output = tool.execute(typedInput, context)
+                    val output = preparedCall.execute(context)
                     ToolResultEnvelope(
                         toolId = tool.descriptor.id, success = true, data = output.toString(),
                         durationMs = System.currentTimeMillis() - start,
@@ -171,7 +191,7 @@ class ToolRuntime(
     }
 
     private fun failure(
-        tool: AgentTool<Any, Any>, error: String, category: ToolErrorCategory,
+        tool: RegisteredTool, error: String, category: ToolErrorCategory,
         durationMs: Long = 0L, isRetryable: Boolean = true,
     ): ToolResultEnvelope = ToolResultEnvelope(
         toolId = tool.descriptor.id, success = false, data = "", error = error,
