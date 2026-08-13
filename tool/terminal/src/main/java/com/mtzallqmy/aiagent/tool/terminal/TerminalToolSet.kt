@@ -24,17 +24,32 @@ fun interface TerminalCommandExecutor {
     ): TerminalToolSet.TerminalResult
 }
 
+/** Process-wide terminal executor. It is fail-closed until the app installs an isolated backend. */
+object TerminalCommandExecutors {
+    @Volatile
+    private var delegate: TerminalCommandExecutor = TerminalCommandExecutor { _, _, _ ->
+        TerminalToolSet.TerminalResult(
+            exitCode = -1,
+            stdout = "",
+            stderr = "Isolated terminal backend is not configured",
+        )
+    }
+
+    fun install(executor: TerminalCommandExecutor) {
+        delegate = executor
+    }
+
+    suspend fun execute(argv: List<String>, timeoutMs: Long, maxOutputBytes: Int) =
+        delegate.execute(argv, timeoutMs, maxOutputBytes)
+}
+
 /**
  * Terminal policy and tool surface. Process creation is delegated to an injected
  * executor so the Android app process never needs to spawn a shell itself.
  */
 class TerminalToolSet(
-    private val commandExecutor: TerminalCommandExecutor = TerminalCommandExecutor { _, _, _ ->
-        TerminalResult(
-            exitCode = -1,
-            stdout = "",
-            stderr = "Isolated terminal backend is not configured",
-        )
+    private val commandExecutor: TerminalCommandExecutor = TerminalCommandExecutor { argv, timeout, limit ->
+        TerminalCommandExecutors.execute(argv, timeout, limit)
     },
     private val allowedCommands: Set<String> = DEFAULT_ALLOWED,
     private val maxSessions: Int = 4,
