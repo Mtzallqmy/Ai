@@ -108,6 +108,9 @@ data class ApprovalRequest(
     val riskLevel: RiskLevel,
     val requestingAgent: String,
     val reason: String,
+    val toolId: String = toolName,
+    val runId: String = "",
+    val agentScope: String = requestingAgent,
 )
 
 data class ApprovalDecision(

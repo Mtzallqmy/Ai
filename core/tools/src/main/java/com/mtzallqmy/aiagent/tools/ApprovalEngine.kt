@@ -8,94 +8,142 @@ import com.mtzallqmy.aiagent.model.RiskLevel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 
-/**
- * Real human-in-the-loop approval engine.
- *
- * - `decide()` returns an IMMEDIATE policy decision (ALLOW / ASK / DENY).
- *   It NEVER defaults ASK policies to an automatic allow — asking without a
- *   real channel defaults to a safe DENY until someone is listening.
- * - `requestApproval()` suspends the caller (the tool runtime) until the UI
- *   resolves the request. The runtime stays in WAITING_FOR_APPROVAL and no
- *   tool executes before the decision arrives.
- */
+/** Single human-approval coordinator with stable, persisted matching rules. */
 class ApprovalEngine(
     private val policyProvider: (RiskLevel) -> ApprovalPolicy = { ApprovalPolicy.ASK_EVERY_TIME },
+    private val ruleStore: ApprovalRuleStore = InMemoryApprovalRuleStore(),
 ) {
+    private data class PendingApproval(
+        val request: ApprovalRequest,
+        val ruleKey: ApprovalRuleKey,
+        val deferred: CompletableDeferred<ApprovalDecision>,
+    )
+
+    private val lock = Any()
     private val perRiskAllowed = mutableSetOf<RiskLevel>()
-    private val perRuleAlwaysAllowed = mutableSetOf<String>()
-    private val perRuleDenied = mutableSetOf<String>()
-    private val pending = mutableMapOf<String, CompletableDeferred<ApprovalDecision>>()
+    private val perRunAllowed = mutableMapOf<String, MutableSet<ApprovalRuleKey>>()
+    private val persistentRules = ruleStore.load().toMutableSet()
+    private val pending = mutableMapOf<String, PendingApproval>()
+    private val requestHistory = object : LinkedHashMap<String, ApprovalRequest>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ApprovalRequest>?): Boolean =
+            size > MAX_REQUEST_HISTORY
+    }
     private val _requests = Channel<ApprovalRequest>(Channel.UNLIMITED)
 
-    /** Live stream of approval requests the UI should observe and present. */
     val requests get() = _requests
+    val pendingCount: Int get() = synchronized(lock) { pending.size }
 
-    val pendingCount: Int get() = synchronized(pending) { pending.size }
-
-    /** Immediate, synchronous policy decision. ASK without a resolver → DENY (fail closed). */
     fun decide(request: ApprovalRequest): ApprovalDecision {
-        val policy = policyProvider(request.riskLevel)
-        val rule = ruleKey(request)
-        val option = when {
-            perRuleDenied.contains(rule) -> ApprovalOption.DENY
-            perRuleAlwaysAllowed.contains(rule) -> ApprovalOption.ALWAYS_ALLOW
-            perRiskAllowed.contains(request.riskLevel) -> ApprovalOption.ALLOW_ONCE
-            policy == ApprovalPolicy.ALLOW -> ApprovalOption.ALLOW_ONCE
-            policy == ApprovalPolicy.DENY -> ApprovalOption.DENY
-            policy == ApprovalPolicy.ASK_ONCE -> ApprovalOption.ASK
-            policy == ApprovalPolicy.ASK_EVERY_TIME -> ApprovalOption.ASK
-            else -> ApprovalOption.ASK
+        val ruleKey = ruleKey(request)
+        val option = synchronized(lock) {
+            remember(request)
+            val policy = policyProvider(request.riskLevel)
+            when {
+                persistentRules.contains(ApprovalRule(ruleKey, ApprovalRuleEffect.DENY)) -> ApprovalOption.DENY
+                persistentRules.contains(ApprovalRule(ruleKey, ApprovalRuleEffect.ALLOW)) -> ApprovalOption.ALWAYS_ALLOW
+                request.runId.isNotBlank() && perRunAllowed[request.runId]?.contains(ruleKey) == true ->
+                    ApprovalOption.ALLOW_FOR_TASK
+                perRiskAllowed.contains(request.riskLevel) -> ApprovalOption.ALLOW_ONCE
+                policy == ApprovalPolicy.ALLOW -> ApprovalOption.ALLOW_ONCE
+                policy == ApprovalPolicy.DENY -> ApprovalOption.DENY
+                else -> ApprovalOption.ASK
+            }
         }
         return ApprovalDecision(request.id, option)
     }
 
-    /**
-     * Suspend until a human resolves the request (or it is cancelled).
-     * Returns the final decision. If nobody is listening when the decision
-     * is needed, the request is still emitted to the UI channel, and the
-     * caller waits — nothing executes in the meantime.
-     */
     suspend fun requestApproval(request: ApprovalRequest): ApprovalDecision {
         var isNewRequest = false
-        val deferred = synchronized(pending) {
-            pending[request.id] ?: CompletableDeferred<ApprovalDecision>().also {
+        val approval = synchronized(lock) {
+            remember(request)
+            pending[request.id] ?: PendingApproval(
+                request = request,
+                ruleKey = ruleKey(request),
+                deferred = CompletableDeferred(),
+            ).also {
                 pending[request.id] = it
                 isNewRequest = true
             }
         }
         return try {
-            // Register before publishing so an immediate UI response cannot be lost.
             if (isNewRequest) _requests.send(request)
-            deferred.await()
+            approval.deferred.await()
         } finally {
-            synchronized(pending) {
-                if (pending[request.id] === deferred) pending.remove(request.id)
+            synchronized(lock) {
+                if (pending[request.id] === approval) pending.remove(request.id)
             }
         }
     }
 
-    /** Called by the UI when the user picks an option. Resumes the suspended runtime. */
-    fun respond(requestId: String, option: ApprovalOption, toolName: String = "") {
-        val deferred = synchronized(pending) { pending[requestId] } ?: return
-        when (option) {
-            ApprovalOption.ALLOW_ONCE, ApprovalOption.ALLOW_FOR_TASK -> { /* allowed for this call or task */ }
-            ApprovalOption.ALWAYS_ALLOW -> alwaysAllow(ruleKeyFromId(requestId, toolName))
-            ApprovalOption.DENY -> denyRule(ruleKeyFromId(requestId, toolName))
-            ApprovalOption.ASK -> { /* no automatic progress — human decides */ }
+    /** Resolves the original request by ID; rule identity is never reconstructed from the ID. */
+    fun respond(requestId: String, option: ApprovalOption) {
+        val approval = synchronized(lock) { pending[requestId] } ?: return
+        if (option == ApprovalOption.ASK) return
+
+        synchronized(lock) {
+            when (option) {
+                ApprovalOption.ALLOW_ONCE -> Unit
+                ApprovalOption.ALLOW_FOR_TASK -> {
+                    if (approval.request.runId.isNotBlank()) {
+                        perRunAllowed.getOrPut(approval.request.runId) { mutableSetOf() }.add(approval.ruleKey)
+                    }
+                }
+                ApprovalOption.ALWAYS_ALLOW -> persist(approval.ruleKey, ApprovalRuleEffect.ALLOW)
+                ApprovalOption.DENY -> persist(approval.ruleKey, ApprovalRuleEffect.DENY)
+                ApprovalOption.ASK -> Unit
+            }
         }
-        deferred.complete(ApprovalDecision(requestId, option))
+        approval.deferred.complete(ApprovalDecision(requestId, option))
     }
 
-    fun allowRiskLevel(level: RiskLevel) { perRiskAllowed.add(level) }
+    fun requestFor(requestId: String): ApprovalRequest? = synchronized(lock) { requestHistory[requestId] }
 
-    fun alwaysAllow(ruleKey: String) { perRuleAlwaysAllowed.add(ruleKey) }
+    fun ruleKeyForRequest(requestId: String): ApprovalRuleKey? =
+        synchronized(lock) { requestHistory[requestId]?.let(::ruleKey) }
 
-    private fun denyRule(ruleKey: String) { perRuleDenied.add(ruleKey) }
+    fun persistentRules(): Set<ApprovalRule> = synchronized(lock) { persistentRules.toSet() }
 
-    private fun ruleKey(request: ApprovalRequest) = "${request.toolName}:${request.target}"
+    fun revoke(ruleKey: ApprovalRuleKey) {
+        synchronized(lock) {
+            val updated = persistentRules.filterNot { it.key == ruleKey }.toSet()
+            if (updated.size != persistentRules.size) {
+                ruleStore.replace(updated)
+                persistentRules.clear()
+                persistentRules.addAll(updated)
+            }
+        }
+    }
 
-    private fun ruleKeyFromId(requestId: String, toolName: String): String {
-        // Best-effort reconstruction: the UI must pass toolName when responding.
-        return if (toolName.isNotBlank()) "$toolName:$requestId" else requestId
+    fun clearRun(runId: String) {
+        synchronized(lock) { perRunAllowed.remove(runId) }
+    }
+
+    fun allowRiskLevel(level: RiskLevel) {
+        synchronized(lock) { perRiskAllowed.add(level) }
+    }
+
+    private fun persist(key: ApprovalRuleKey, effect: ApprovalRuleEffect) {
+        val updated = persistentRules.filterNot { it.key == key }.toMutableSet().apply {
+            add(ApprovalRule(key, effect))
+        }
+        ruleStore.replace(updated)
+        persistentRules.clear()
+        persistentRules.addAll(updated)
+    }
+
+    private fun remember(request: ApprovalRequest) {
+        requestHistory[request.id] = request
+    }
+
+    private fun ruleKey(request: ApprovalRequest) = ApprovalRuleKey(
+        toolId = request.toolId,
+        action = request.action,
+        target = request.target,
+        risk = request.riskLevel,
+        agentScope = request.agentScope,
+    )
+
+    private companion object {
+        const val MAX_REQUEST_HISTORY = 1_000
     }
 }
