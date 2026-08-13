@@ -21,6 +21,14 @@ sealed class ToolAvailability {
     data class Unavailable(val reason: String) : ToolAvailability()
 }
 
+/** Observable execution states owned by [ToolRuntime]. */
+enum class ToolRuntimeState {
+    CHECKING_POLICY,
+    WAITING_FOR_APPROVAL,
+    CHECKING_CAPABILITIES,
+    EXECUTING,
+}
+
 /**
  * Real Tool Runtime:
  * - validates tool input against the tool's JSON schema (no raw-string pass-through)
@@ -48,6 +56,7 @@ class ToolRuntime(
         agentId: String = "main",
         maxToolCallsPerRun: Int = 50,
         maxRetries: Int = 1,
+        onStateChange: (ToolRuntimeState) -> Unit = {},
     ): ToolResultEnvelope {
         // 0. Schema validation: LLM arguments -> JSON parser -> schema validator -> typed input
         val typedInput = when (input) {
@@ -80,8 +89,9 @@ class ToolRuntime(
 
         val start = System.currentTimeMillis()
 
-        // 2. Risk + approval. ASK policies suspend the run; nothing executes before a decision.
-        val immediate = approvalEngine.decide(ApprovalRequest(
+        // 2. Policy + approval. This is the only approval path for every tool call.
+        onStateChange(ToolRuntimeState.CHECKING_POLICY)
+        val approvalRequest = ApprovalRequest(
             toolName = tool.descriptor.displayName,
             action = "execute",
             target = tool.descriptor.id,
@@ -89,19 +99,13 @@ class ToolRuntime(
             riskLevel = tool.descriptor.riskLevel,
             requestingAgent = agentId,
             reason = "Requested during run $runId",
-        ))
+        )
+        val immediate = approvalEngine.decide(approvalRequest)
         val decision = when (immediate.decision) {
-            ApprovalOption.ASK -> approvalEngine.requestApproval(
-                ApprovalRequest(
-                    toolName = tool.descriptor.displayName,
-                    action = "execute",
-                    target = tool.descriptor.id,
-                    argumentsSummary = typedInput.toString().take(200),
-                    riskLevel = tool.descriptor.riskLevel,
-                    requestingAgent = agentId,
-                    reason = "Sensitive action: ${tool.descriptor.riskLevel} — requires approval",
-                ),
-            )
+            ApprovalOption.ASK -> {
+                onStateChange(ToolRuntimeState.WAITING_FOR_APPROVAL)
+                approvalEngine.requestApproval(approvalRequest)
+            }
             else -> immediate
         }
         if (decision.decision == ApprovalOption.DENY || decision.decision == ApprovalOption.ASK) {
@@ -110,6 +114,7 @@ class ToolRuntime(
         }
 
         // 3. Availability via Capability Registry
+        onStateChange(ToolRuntimeState.CHECKING_CAPABILITIES)
         val availability = tool.availability(context)
         if (availability !is ToolAvailability.Available) {
             return failure(tool, (availability as ToolAvailability.Unavailable).reason,
@@ -128,6 +133,7 @@ class ToolRuntime(
         }
 
         // 5. Timed execution with cancellation + retries
+        onStateChange(ToolRuntimeState.EXECUTING)
         var attempt = 0
         while (true) {
             attempt++
@@ -166,4 +172,3 @@ class ToolRuntime(
         durationMs = durationMs, isRetryable = isRetryable, errorCategory = category,
     )
 }
-

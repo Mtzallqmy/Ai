@@ -14,7 +14,7 @@ import kotlinx.coroutines.channels.Channel
  * - `decide()` returns an IMMEDIATE policy decision (ALLOW / ASK / DENY).
  *   It NEVER defaults ASK policies to an automatic allow — asking without a
  *   real channel defaults to a safe DENY until someone is listening.
- * - `requestApproval()` suspends the caller (the agent runtime) until the UI
+ * - `requestApproval()` suspends the caller (the tool runtime) until the UI
  *   resolves the request. The runtime stays in WAITING_FOR_APPROVAL and no
  *   tool executes before the decision arrives.
  */
@@ -30,7 +30,7 @@ class ApprovalEngine(
     /** Live stream of approval requests the UI should observe and present. */
     val requests get() = _requests
 
-    val pendingCount: Int get() = pending.size
+    val pendingCount: Int get() = synchronized(pending) { pending.size }
 
     /** Immediate, synchronous policy decision. ASK without a resolver → DENY (fail closed). */
     fun decide(request: ApprovalRequest): ApprovalDecision {
@@ -56,22 +56,27 @@ class ApprovalEngine(
      * caller waits — nothing executes in the meantime.
      */
     suspend fun requestApproval(request: ApprovalRequest): ApprovalDecision {
-        val existing = pending[request.id]
-        if (existing != null) return existing.await()
-
-        _requests.send(request)
-        val deferred = CompletableDeferred<ApprovalDecision>()
-        pending[request.id] = deferred
+        var isNewRequest = false
+        val deferred = synchronized(pending) {
+            pending[request.id] ?: CompletableDeferred<ApprovalDecision>().also {
+                pending[request.id] = it
+                isNewRequest = true
+            }
+        }
         return try {
+            // Register before publishing so an immediate UI response cannot be lost.
+            if (isNewRequest) _requests.send(request)
             deferred.await()
         } finally {
-            pending.remove(request.id)
+            synchronized(pending) {
+                if (pending[request.id] === deferred) pending.remove(request.id)
+            }
         }
     }
 
     /** Called by the UI when the user picks an option. Resumes the suspended runtime. */
     fun respond(requestId: String, option: ApprovalOption, toolName: String = "") {
-        val deferred = pending[requestId] ?: return
+        val deferred = synchronized(pending) { pending[requestId] } ?: return
         when (option) {
             ApprovalOption.ALLOW_ONCE, ApprovalOption.ALLOW_FOR_TASK -> { /* allowed for this call or task */ }
             ApprovalOption.ALWAYS_ALLOW -> alwaysAllow(ruleKeyFromId(requestId, toolName))
