@@ -10,6 +10,7 @@ class RagComponentsTest {
     @Test
     fun `embedder is deterministic and dimension-consistent`() = runBlocking {
         val embedder = KeywordEmbedder(dimension = 64)
+        assertEquals(EmbeddingQuality.FALLBACK_KEYWORD, embedder.quality)
         val v1 = embedder.embed("Hello world test one")
         val v2 = embedder.embed("Hello world test one")
         assertEquals(64, v1.size)
@@ -72,5 +73,55 @@ class RagComponentsTest {
             }
         }
         assertTrue(ex.message!!.contains("secret"))
+    }
+
+    @Test
+    fun `reingestion atomically replaces stale source chunks and retains content references`() = runBlocking {
+        val store = InMemoryVectorStore(dimension = 64)
+        val ingestor = DocumentIngestor(
+            store,
+            KeywordEmbedder(dimension = 64),
+            chunkMaxChars = 100,
+            chunkOverlapChars = 20,
+        )
+        assertTrue(ingestor.ingest("docs", "same-source", "first ".repeat(100)) > 1)
+        assertTrue(store.size > 1)
+
+        assertEquals(1, ingestor.ingest("docs", "same-source", "replacement content"))
+        assertEquals(1, store.size)
+        val result = ingestor.findRelevant("docs", "replacement", 1).single()
+        assertEquals("replacement content", result.content)
+        assertTrue(result.contentHash.isNotBlank())
+    }
+
+    @Test
+    fun `vector store rejects non finite values and invalid topK`() = runBlocking {
+        val store = InMemoryVectorStore(dimension = 2)
+        assertFailsWith<IllegalArgumentException> {
+            store.upsert("bad", "ns", listOf(Double.NaN, 0.0), "source")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            store.search("ns", listOf(1.0, 0.0), topK = 0)
+        }
+        Unit
+    }
+
+    @Test
+    fun `rag runtime uses only explicitly selected provider and dimension store`() = runBlocking {
+        val keyword = KeywordEmbedder(dimension = 32)
+        val registry = EmbeddingProviderRegistry().apply { register(keyword) }
+        var selected = "missing"
+        val runtime = RagRuntime(
+            providers = registry,
+            selectedProviderId = { selected },
+            vectorStoreFactory = { InMemoryVectorStore(it.dimension) },
+        )
+        assertFailsWith<IllegalStateException> {
+            runtime.ingest("docs", "source", "content")
+        }
+
+        selected = keyword.providerId
+        assertEquals(1, runtime.ingest("docs", "source", "content"))
+        assertEquals("source", runtime.findRelevant("docs", "content", 1).single().source)
     }
 }

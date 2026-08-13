@@ -127,7 +127,7 @@ private class FakeLocalBackend(
         acknowledgeWarnings: Boolean,
     ): LoadedLocalModel {
         lastAcknowledgedWarnings = acknowledgeWarnings
-        val loaded = LoadedLocalModel(reference, metadata, "a".repeat(64), "Test", 1, 2_000_000, options)
+        val loaded = LoadedLocalModel(reference, metadata, "a".repeat(64), "Test", 1, 2_000_000, 2, options)
         mutableState.value = LocalModelState.Ready(loaded)
         return loaded
     }

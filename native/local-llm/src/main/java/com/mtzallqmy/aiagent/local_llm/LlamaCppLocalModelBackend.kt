@@ -97,6 +97,7 @@ class LlamaCppLocalModelBackend internal constructor(
                     nativeDescription = nativeInfo.description,
                     parameterCount = nativeInfo.parameterCount,
                     tensorBytes = nativeInfo.tensorBytes,
+                    embeddingDimension = nativeInfo.embeddingDimension,
                     options = options,
                 )
                 modelHandle = newHandle
@@ -178,6 +179,38 @@ class LlamaCppLocalModelBackend internal constructor(
         val handle = generationHandle
         if (handle != 0L) native.cancelGeneration(handle)
     }
+
+    override suspend fun embed(text: String, options: LocalEmbeddingOptions): LocalEmbedding =
+        operationMutex.withLock {
+            withContext(Dispatchers.IO) {
+                require(text.isNotBlank() && text.length <= 1_000_000) { "Invalid embedding input" }
+                check(generationHandle == 0L) { "Cannot embed while generation is active" }
+                val model = checkNotNull(loadedModel) { "No local model is loaded" }
+                val handle = modelHandle
+                check(handle != 0L) { "No native model is loaded" }
+                mutableState.value = LocalModelState.Embedding(model)
+                val started = System.currentTimeMillis()
+                try {
+                    val values = native.embed(
+                        modelHandle = handle,
+                        text = text,
+                        contextSize = options.contextSize,
+                        threads = options.threads,
+                        normalize = options.normalize,
+                    )
+                    check(values.isNotEmpty() && values.all(Float::isFinite)) {
+                        "llama.cpp returned an invalid embedding"
+                    }
+                    LocalEmbedding(
+                        values = values.map(Float::toDouble),
+                        modelSha256 = model.sha256,
+                        elapsedMillis = System.currentTimeMillis() - started,
+                    )
+                } finally {
+                    mutableState.value = LocalModelState.Ready(model)
+                }
+            }
+        }
 
     private fun validateAssessment(
         record: AssessmentRecord,

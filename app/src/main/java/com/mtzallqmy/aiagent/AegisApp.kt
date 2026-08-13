@@ -18,11 +18,13 @@ import com.mtzallqmy.aiagent.capabilities.CapabilityRegistry
 import com.mtzallqmy.aiagent.datastore.SecureSettings
 import com.mtzallqmy.aiagent.database.DatabaseProvider
 import com.mtzallqmy.aiagent.feature.device.DeviceToolSet
-import com.mtzallqmy.aiagent.memory.DocumentIngestor
-import com.mtzallqmy.aiagent.memory.InMemoryVectorStore
+import com.mtzallqmy.aiagent.memory.EmbeddingProviderRegistry
 import com.mtzallqmy.aiagent.memory.KeywordEmbedder
 import com.mtzallqmy.aiagent.memory.MemoryRefiner
 import com.mtzallqmy.aiagent.memory.MemoryStore
+import com.mtzallqmy.aiagent.memory.OpenAiEmbeddingsProvider
+import com.mtzallqmy.aiagent.memory.RagRuntime
+import com.mtzallqmy.aiagent.memory.SQLiteVectorStore
 import com.mtzallqmy.aiagent.local_llm.AndroidLocalDeviceResources
 import com.mtzallqmy.aiagent.local_llm.LlamaCppLocalModelBackend
 import com.mtzallqmy.aiagent.provider.anthropic.AnthropicProvider
@@ -31,6 +33,7 @@ import com.mtzallqmy.aiagent.provider.google.GeminiProvider
 import com.mtzallqmy.aiagent.provider.openai.OpenAiProvider
 import com.mtzallqmy.aiagent.provider.openrouter.OpenRouterProvider
 import com.mtzallqmy.aiagent.provider.local.LocalProvider
+import com.mtzallqmy.aiagent.provider.local.LlamaCppEmbeddingsProvider
 import com.mtzallqmy.aiagent.security.CredentialScope
 import com.mtzallqmy.aiagent.security.CredentialVault
 import com.mtzallqmy.aiagent.sandbox.ProotLinuxBackend
@@ -109,7 +112,9 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         private set
     lateinit var memoryRefiner: MemoryRefiner
         private set
-    lateinit var documentIngestor: DocumentIngestor
+    lateinit var embeddingProviderRegistry: EmbeddingProviderRegistry
+        private set
+    lateinit var ragRuntime: RagRuntime
         private set
     lateinit var codingBackend: CodingBackend
         private set
@@ -154,12 +159,11 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
             add(internalModels)
             getExternalFilesDir("models")?.apply { mkdirs() }?.let(::add)
         }
-        localProvider = LocalProvider(
-            backend = LlamaCppLocalModelBackend(
-                modelRoots = modelRoots,
-                resources = AndroidLocalDeviceResources(this),
-            ),
+        val localModelBackend = LlamaCppLocalModelBackend(
+            modelRoots = modelRoots,
+            resources = AndroidLocalDeviceResources(this),
         )
+        localProvider = LocalProvider(backend = localModelBackend)
         providerRegistry.register(localProvider)
 
         smartRouter = SmartRoutingProvider(
@@ -173,7 +177,7 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         providerRegistry.register(smartRouter)
 
         contextManager = ContextManager()
-        memoryStore = MemoryStore { databaseProvider.get(this) }
+        memoryStore = MemoryStore(database = { databaseProvider.get(this) })
         workspaceManager = WorkspaceManager(this)
         skillRegistry = SkillRegistry()
         sandboxBackendRegistry = SandboxBackendRegistry(
@@ -203,11 +207,30 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
             scope = applicationScope,
         )
 
-        // Phase 5 integrations (studied reference repos, clean-room implementations)
-        val vectorStore = InMemoryVectorStore()
-        val embedder = KeywordEmbedder()
+        embeddingProviderRegistry = EmbeddingProviderRegistry().apply {
+            register(KeywordEmbedder())
+            register(
+                OpenAiEmbeddingsProvider(
+                    apiKeyProvider = { vault.load(CredentialScope.PROVIDER, "openai_api_key") },
+                ),
+            )
+            register(LlamaCppEmbeddingsProvider(localModelBackend))
+        }
+        ragRuntime = RagRuntime(
+            providers = embeddingProviderRegistry,
+            selectedProviderId = {
+                settings.getString("embedding_provider_id") ?: "keyword-fallback"
+            },
+            vectorStoreFactory = { provider ->
+                val safeId = provider.providerId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                SQLiteVectorStore(
+                    context = this,
+                    dimension = provider.dimension,
+                    databaseName = "aegis_vectors_${safeId}_${provider.dimension}.db",
+                )
+            },
+        )
         memoryRefiner = MemoryRefiner()
-        documentIngestor = DocumentIngestor(vectorStore, embedder)
         heartbeatAgent = HeartbeatAgent()
 
         // Device backends: Accessibility (on-device) + ADB (optional, requires PC pairing)

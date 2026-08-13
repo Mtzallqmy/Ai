@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -257,6 +258,17 @@ Java_com_mtzallqmy_aiagent_local_1llm_internal_LlamaCppJniBridge_modelTensorByte
     return static_cast<jlong>(llama_model_size(handle->model));
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_mtzallqmy_aiagent_local_1llm_internal_LlamaCppJniBridge_modelEmbeddingDimension(
+    JNIEnv * env,
+    jobject,
+    jlong raw_model
+) {
+    auto * handle = require_model(env, raw_model);
+    if (handle == nullptr) return 0;
+    return static_cast<jint>(llama_model_n_embd_out(handle->model));
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_mtzallqmy_aiagent_local_1llm_internal_LlamaCppJniBridge_unloadModel(
     JNIEnv * env,
@@ -362,6 +374,103 @@ Java_com_mtzallqmy_aiagent_local_1llm_internal_LlamaCppJniBridge_startGeneration
         llama_sampler_chain_add(generation->sampler, llama_sampler_init_dist(native_seed));
     }
     return reinterpret_cast<jlong>(generation.release());
+}
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_mtzallqmy_aiagent_local_1llm_internal_LlamaCppJniBridge_embed(
+    JNIEnv * env,
+    jobject,
+    jlong raw_model,
+    jstring text,
+    jint context_size,
+    jint threads,
+    jboolean normalize
+) {
+    auto * model = require_model(env, raw_model);
+    if (model == nullptr) return nullptr;
+    if (text == nullptr || context_size < 64 || threads < 1) {
+        throw_java(env, "java/lang/IllegalArgumentException", "Invalid embedding parameters");
+        return nullptr;
+    }
+
+    const std::string input = java_string_to_utf8(env, text);
+    if (env->ExceptionCheck()) return nullptr;
+    if (input.empty() || input.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        throw_java(env, "java/lang/IllegalArgumentException", "Embedding input is empty or too large");
+        return nullptr;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(model->model);
+    int token_count = -llama_tokenize(
+        vocab, input.c_str(), static_cast<int32_t>(input.size()), nullptr, 0, true, true
+    );
+    if (token_count <= 0 || token_count > context_size) {
+        throw_java(env, "java/lang/IllegalArgumentException", "Embedding input does not fit the context");
+        return nullptr;
+    }
+    std::vector<llama_token> tokens(static_cast<size_t>(token_count));
+    token_count = llama_tokenize(
+        vocab,
+        input.c_str(),
+        static_cast<int32_t>(input.size()),
+        tokens.data(),
+        token_count,
+        true,
+        true
+    );
+    if (token_count <= 0) {
+        throw_java(env, "java/lang/IllegalArgumentException", "Embedding tokenization failed");
+        return nullptr;
+    }
+
+    llama_context_params params = llama_context_default_params();
+    params.n_ctx = static_cast<uint32_t>(context_size);
+    params.n_batch = static_cast<uint32_t>(context_size);
+    params.n_ubatch = static_cast<uint32_t>(std::min(context_size, 512));
+    params.n_threads = threads;
+    params.n_threads_batch = threads;
+    params.embeddings = true;
+    params.pooling_type = LLAMA_POOLING_TYPE_MEAN;
+    params.attention_type = LLAMA_ATTENTION_TYPE_NON_CAUSAL;
+    llama_context * context = llama_init_from_model(model->model, params);
+    if (context == nullptr) {
+        throw_java(env, "java/lang/OutOfMemoryError", "llama.cpp could not allocate embedding context");
+        return nullptr;
+    }
+
+    auto batch = llama_batch_get_one(tokens.data(), token_count);
+    const int status = llama_model_has_encoder(model->model)
+        ? llama_encode(context, batch)
+        : llama_decode(context, batch);
+    if (status != 0) {
+        llama_free(context);
+        throw_java(env, "java/lang/IllegalStateException", "llama.cpp embedding evaluation failed");
+        return nullptr;
+    }
+
+    const float * embedding = llama_get_embeddings_seq(context, 0);
+    if (embedding == nullptr) embedding = llama_get_embeddings_ith(context, -1);
+    const int dimension = llama_model_n_embd_out(model->model);
+    if (embedding == nullptr || dimension <= 0) {
+        llama_free(context);
+        throw_java(env, "java/lang/UnsupportedOperationException", "Loaded GGUF model has no embedding output");
+        return nullptr;
+    }
+
+    std::vector<float> values(embedding, embedding + dimension);
+    if (normalize == JNI_TRUE) {
+        double norm_squared = 0.0;
+        for (float value : values) norm_squared += static_cast<double>(value) * value;
+        const double norm = std::sqrt(norm_squared);
+        if (norm > 0.0) {
+            for (float & value : values) value = static_cast<float>(value / norm);
+        }
+    }
+    llama_free(context);
+
+    auto result = env->NewFloatArray(dimension);
+    if (result != nullptr) env->SetFloatArrayRegion(result, 0, dimension, values.data());
+    return result;
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL

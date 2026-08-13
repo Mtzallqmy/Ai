@@ -22,6 +22,7 @@ android {
 dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(project(":core:model"))
+    implementation(project(":core:memory"))
     implementation(project(":core:network"))
     implementation(project(":native:local-llm"))
     testImplementation(libs.junit)

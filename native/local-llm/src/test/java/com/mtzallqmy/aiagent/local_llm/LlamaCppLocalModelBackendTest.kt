@@ -61,6 +61,26 @@ class LlamaCppLocalModelBackendTest {
         assertTrue(native.cancelled)
         assertFalse(native.generationAllocated)
     }
+
+    @Test
+    fun `local embedding reaches native model and preserves model identity`() = runBlocking {
+        val root = temporaryFolder.newFolder("embedding-models")
+        val file = root.resolve("embed.gguf").also(::createGguf)
+        val native = FakeNativeBridge()
+        val backend = LlamaCppLocalModelBackend(LocalModelDiscovery(listOf(root)), FakeResources(), native)
+        val reference = LocalModelReference(file.canonicalPath)
+        val options = LocalModelLoadOptions()
+        val assessment = backend.assessLoad(reference, options)
+        val loaded = backend.load(reference, options, assessment.assessmentId)
+
+        val embedding = backend.embed("semantic input")
+
+        assertEquals(0.6, embedding.values[0], 0.0001)
+        assertEquals(0.8, embedding.values[1], 0.0001)
+        assertEquals(loaded.sha256, embedding.modelSha256)
+        assertEquals(LocalModelState.Ready(loaded), backend.state.value)
+        assertEquals(1, native.embeddingCount)
+    }
 }
 
 private class FakeNativeBridge(
@@ -72,13 +92,14 @@ private class FakeNativeBridge(
     @Volatile var generationAllocated = false
     val generationStarted = CountDownLatch(1)
     private var tokenReturned = false
+    var embeddingCount = 0
 
     override fun loadModel(path: String, useMemoryMap: Boolean): Long {
         loadCount += 1
         return 10
     }
 
-    override fun modelInfo(modelHandle: Long) = NativeModelInfo("Native Test", 100, 200)
+    override fun modelInfo(modelHandle: Long) = NativeModelInfo("Native Test", 100, 200, 2)
 
     override fun unloadModel(modelHandle: Long) {
         unloadCount += 1
@@ -118,5 +139,16 @@ private class FakeNativeBridge(
 
     override fun freeGeneration(generationHandle: Long) {
         generationAllocated = false
+    }
+
+    override fun embed(
+        modelHandle: Long,
+        text: String,
+        contextSize: Int,
+        threads: Int,
+        normalize: Boolean,
+    ): FloatArray {
+        embeddingCount += 1
+        return floatArrayOf(0.6f, 0.8f)
     }
 }
