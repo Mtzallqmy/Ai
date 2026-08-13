@@ -46,6 +46,9 @@ sealed class ProviderError(message: String, cause: Throwable? = null) : Throwabl
     data class ProviderError_(val statusCode: Int, val reason: String) : ProviderError("Provider error $statusCode: $reason")
     data class ModelNotFoundError(val modelId: String) : ProviderError("Model not found: $modelId")
     data object StreamingNotSupported : ProviderError("Streaming not supported by this provider")
+    data class ConfigurationError(val reason: String) : ProviderError(reason)
+    data class CapabilityError(val reason: String) : ProviderError(reason)
+    data class RoutingError(val reason: String) : ProviderError(reason)
 }
 
 /** Chat message stored in memory/database. Secrets must never enter content. */
@@ -174,6 +177,32 @@ data class AiModel(
     val name: String,
     val providerId: String,
     val capabilities: ModelCapabilities = ModelCapabilities(),
+    val routing: ModelRoutingMetadata = ModelRoutingMetadata(),
+)
+
+enum class ModelDeployment { CLOUD, LOCAL }
+
+enum class ModelSpeedTier { FAST, BALANCED, QUALITY }
+
+data class ModelRoutingMetadata(
+    val deployment: ModelDeployment = ModelDeployment.CLOUD,
+    val speedTier: ModelSpeedTier = ModelSpeedTier.BALANCED,
+    val codingOptimized: Boolean = false,
+)
+
+enum class DataSensitivity { STANDARD, SENSITIVE }
+
+enum class WorkloadKind { AUTO, SIMPLE, GENERAL, CODING }
+
+/** Explicit routing constraints. Sensitive/offline constraints never permit cloud fallback. */
+data class RoutingHint(
+    val sensitivity: DataSensitivity = DataSensitivity.STANDARD,
+    val offline: Boolean = false,
+    val requiresVision: Boolean = false,
+    val workload: WorkloadKind = WorkloadKind.AUTO,
+    val requiredContextTokens: Int = 0,
+    val preferLocal: Boolean = false,
+    val requestedProviderId: String? = null,
 )
 
 /** Generation request sent from the Agent Runtime to any provider. */
@@ -184,6 +213,7 @@ data class GenerationRequest(
     val maxTokens: Int? = null,
     val temperature: Double = 0.7,
     val stream: Boolean = true,
+    val routingHint: RoutingHint = RoutingHint(),
 )
 
 /** Typed tool descriptor used by Agent and Provider layers. */

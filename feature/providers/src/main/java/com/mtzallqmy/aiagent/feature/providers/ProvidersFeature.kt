@@ -27,5 +27,8 @@ class ProvidersFeature(
         is ProviderError.NetworkError -> "Network error: ${error.reason}"
         is ProviderError.ProviderError_ -> "Provider error (${error.statusCode}): ${error.reason}"
         is ProviderError.StreamingNotSupported -> "Streaming not supported by this provider"
+        is ProviderError.ConfigurationError -> "Configuration error: ${error.reason}"
+        is ProviderError.CapabilityError -> "Capability unavailable: ${error.reason}"
+        is ProviderError.RoutingError -> "Routing failed: ${error.reason}"
     }
 }
