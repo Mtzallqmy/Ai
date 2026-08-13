@@ -22,10 +22,26 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install Android NDK
+        run: sdkmanager "ndk;26.3.11579264"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Test Rust runtime on host
+        run: cargo test --locked --manifest-path native/runtime-rust/rust/Cargo.toml
+
       - name: Grant gradlew permission
         run: chmod +x ./gradlew
 
       - name: Build debug APK
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
         run: ./gradlew assembleDebug -Plint=false
 
       - name: Run local tests
