@@ -8,6 +8,7 @@ import com.mtzallqmy.aiagent.tools.ApprovalEngine
 import com.mtzallqmy.aiagent.tools.ToolContext
 import com.mtzallqmy.aiagent.tools.ToolRuntime
 import com.mtzallqmy.aiagent.tools.TypedToolRegistry
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
@@ -76,22 +77,34 @@ class McpRuntimeTest {
     }
 
     @Test
+    fun `malformed JSON RPC response is rejected`() = runBlocking {
+        val client = McpClient(object : McpTransport {
+            override suspend fun send(payload: String, sessionId: String?) =
+                McpTransportResponse(200, "not-json", sessionId)
+            override suspend fun closeSession(sessionId: String?) = Unit
+        })
+
+        val failure = runCatching { client.initialize() }.exceptionOrNull()
+
+        assertTrue(failure is McpProtocolException.InvalidResponse)
+    }
+
+    @Test
+    fun `authentication rejection is surfaced as permission denied`() = runBlocking {
+        val client = McpClient(object : McpTransport {
+            override suspend fun send(payload: String, sessionId: String?) =
+                McpTransportResponse(403, "", sessionId)
+            override suspend fun closeSession(sessionId: String?) = Unit
+        })
+
+        val failure = runCatching { client.initialize() }.exceptionOrNull()
+
+        assertTrue(failure is McpProtocolException.PermissionDenied)
+    }
+
+    @Test
     fun `OAuth authorization uses PKCE S256 and unique state`() = runBlocking {
-        val oauth = McpOAuthClient(
-            McpOAuthConfiguration(
-                serverId = "server",
-                authorizationEndpoint = "https://auth.example.test/authorize",
-                tokenEndpoint = "https://auth.example.test/token",
-                clientId = "aegis",
-                redirectUri = "aegis://oauth/mcp",
-                scopes = setOf("mcp:tools", "mcp:resources"),
-            ),
-            object : McpOAuthTokenStore {
-                override fun load(serverId: String) = null
-                override fun save(serverId: String, tokens: McpOAuthTokens) = Unit
-                override fun clear(serverId: String) = Unit
-            },
-        )
+        val oauth = oauthClient(RecordingTokenStore())
 
         val first = oauth.beginAuthorization()
         val second = oauth.beginAuthorization()
@@ -100,6 +113,55 @@ class McpRuntimeTest {
         assertTrue(first.authorizationUrl.contains("state="))
         assertFalse(first.state == second.state)
     }
+
+    @Test
+    fun `OAuth state mismatch is rejected before token exchange`() = runBlocking {
+        val store = RecordingTokenStore()
+        val oauth = oauthClient(store)
+        oauth.beginAuthorization()
+
+        val failure = runCatching {
+            oauth.completeAuthorization("authorization-code", "wrong-state")
+        }.exceptionOrNull()
+
+        assertTrue(failure is SecurityException)
+        assertNull(store.saved)
+    }
+
+    @Test
+    fun `expired OAuth token without refresh token is cleared`() = runBlocking {
+        val store = RecordingTokenStore().apply {
+            loaded = McpOAuthTokens(
+                accessToken = "expired-access",
+                tokenType = "Bearer",
+                expiresAtMillis = 1_000L,
+                refreshToken = null,
+                scope = "mcp:tools",
+            )
+        }
+        val oauth = oauthClient(store, clock = { 120_000L })
+
+        val headers = oauth.authorizationHeaders()
+
+        assertTrue(headers.isEmpty())
+        assertTrue(store.cleared.get())
+    }
+
+    private fun oauthClient(
+        store: McpOAuthTokenStore,
+        clock: () -> Long = System::currentTimeMillis,
+    ) = McpOAuthClient(
+        McpOAuthConfiguration(
+            serverId = "server",
+            authorizationEndpoint = "https://auth.example.test/authorize",
+            tokenEndpoint = "https://auth.example.test/token",
+            clientId = "aegis",
+            redirectUri = "aegis://oauth/mcp",
+            scopes = setOf("mcp:tools", "mcp:resources"),
+        ),
+        store,
+        clock,
+    )
 
     private fun configuration() = McpServerConfiguration(
         serverId = "server",
@@ -111,6 +173,22 @@ class McpRuntimeTest {
             promptsAllowed = false,
         ),
     )
+
+    private class RecordingTokenStore : McpOAuthTokenStore {
+        var loaded: McpOAuthTokens? = null
+        var saved: McpOAuthTokens? = null
+        val cleared = AtomicBoolean(false)
+
+        override fun load(serverId: String): McpOAuthTokens? = loaded
+        override fun save(serverId: String, tokens: McpOAuthTokens) {
+            saved = tokens
+            loaded = tokens
+        }
+        override fun clear(serverId: String) {
+            cleared.set(true)
+            loaded = null
+        }
+    }
 
     private class ScriptedTransport(
         private val failFirstToolsList: Boolean = false,
