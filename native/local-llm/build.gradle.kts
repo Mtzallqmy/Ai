@@ -13,7 +13,6 @@ android {
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            // llama.cpp inference is intentionally limited to 64-bit processes.
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
         externalNativeBuild {
@@ -62,4 +61,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.espresso.core)
 }

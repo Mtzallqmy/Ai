@@ -23,18 +23,24 @@ android {
     }
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+}
+
 dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
-    implementation(libs.androidx.room.testing)
     ksp(libs.androidx.room.compiler)
     implementation(project(":core:model"))
+
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.room.testing)
 
-android {
-    publishing {
-        singleVariant("debug")
+    android {
+        publishing {
+            singleVariant("debug")
+        }
     }
-}
-
 }

@@ -23,6 +23,7 @@ dependencyResolutionManagement {
 rootProject.name = "AiAgent"
 
 include(":app")
+include(":benchmark")
 
 // Core modules
 include(":core:model")
@@ -33,6 +34,7 @@ include(":core:network")
 include(":core:security")
 include(":core:permissions")
 include(":core:ui")
+include(":core:designsystem")
 include(":core:agent")
 include(":core:tools")
 include(":core:capabilities")
