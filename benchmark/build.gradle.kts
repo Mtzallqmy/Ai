@@ -1,6 +1,6 @@
 plugins {
-    id("com.android.test") version "8.5.2"
-    id("org.jetbrains.kotlin.android") version "1.9.24"
+    id("com.android.test")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
