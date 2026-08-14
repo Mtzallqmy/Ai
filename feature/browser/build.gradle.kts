@@ -39,6 +39,8 @@ android {
     implementation(libs.squareup.okhttp)
     implementation(libs.squareup.okhttp.logging)
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.core)
     testImplementation(libs.kotlinx.coroutines.test)
 
 }

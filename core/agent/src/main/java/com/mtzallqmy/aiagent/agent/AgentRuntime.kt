@@ -121,6 +121,17 @@ class AgentRuntime(
         history: List<ChatMessage>,
         routingHint: RoutingHint,
     ) {
+        if (maxToolCallsPerRun == 0) {
+            runRecord.completedAt = System.currentTimeMillis()
+            runRecord.status = "completed"
+            appendTimeline(runRecord.runId, "Completed — tool execution disabled by budget")
+            _state.value = AgentState.COMPLETED
+            _events.emit(GenerationEvent.GenerationCompleted("Tool execution disabled by the configured budget."))
+            toolRuntime.clearApprovalScope(runRecord.runId)
+            persist(runRecord)
+            return
+        }
+
         _state.value = AgentState.THINKING
         appendTimeline(runRecord.runId, "Planning")
         val contextManager = ContextManager(contextWindow = providerModelContextWindow(modelId))
