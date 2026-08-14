@@ -139,6 +139,7 @@ class OpenAiProvider(
                                 val data = line.removePrefix("data:").trim()
                                 if (data == "[DONE]") {
                                     completeOnce()
+                                    close()
                                     break
                                 }
                                 val chunk = runCatching { json.decodeFromString<ChatCompletionChunk>(data) }
