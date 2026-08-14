@@ -125,8 +125,8 @@ class AgentRuntime(
             runRecord.completedAt = System.currentTimeMillis()
             runRecord.status = "completed"
             appendTimeline(runRecord.runId, "Completed — tool execution disabled by budget")
-            _state.value = AgentState.COMPLETED
             _events.emit(GenerationEvent.GenerationCompleted("Tool execution disabled by the configured budget."))
+            _state.value = AgentState.COMPLETED
             toolRuntime.clearApprovalScope(runRecord.runId)
             persist(runRecord)
             return
@@ -230,8 +230,8 @@ class AgentRuntime(
                 runRecord.status = "token_budget_exceeded"
                 runRecord.completedAt = System.currentTimeMillis()
                 appendTimeline(runRecord.runId, "Token budget exhausted — finalizing")
-                _state.value = AgentState.COMPLETED
                 _events.emit(GenerationEvent.GenerationCompleted("Token budget exhausted. Task stopped to stay within the configured limit."))
+                _state.value = AgentState.COMPLETED
                 toolRuntime.clearApprovalScope(runRecord.runId)
                 persist(runRecord)
                 return
@@ -242,8 +242,8 @@ class AgentRuntime(
                 runRecord.completedAt = System.currentTimeMillis()
                 runRecord.status = "completed"
                 appendTimeline(runRecord.runId, "Completed")
-                _state.value = AgentState.COMPLETED
                 _events.emit(GenerationEvent.GenerationCompleted(assistantText))
+                _state.value = AgentState.COMPLETED
                 toolRuntime.clearApprovalScope(runRecord.runId)
                 persist(runRecord)
                 return
@@ -298,9 +298,9 @@ class AgentRuntime(
             runRecord.status = "step_budget_exceeded"
             runRecord.completedAt = System.currentTimeMillis()
             appendTimeline(runRecord.runId, "Step budget exceeded")
-            _state.value = AgentState.FAILED
             _events.emit(GenerationEvent.GenerationFailed(
                 ProviderError.ProviderError_(429, "Maximum steps ($maxSteps) exceeded")))
+            _state.value = AgentState.FAILED
             toolRuntime.clearApprovalScope(runRecord.runId)
             persist(runRecord)
         }
