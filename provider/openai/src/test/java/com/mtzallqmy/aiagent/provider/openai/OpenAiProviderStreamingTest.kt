@@ -5,6 +5,7 @@ import com.mtzallqmy.aiagent.model.GenerationEvent
 import com.mtzallqmy.aiagent.model.GenerationRequest
 import com.mtzallqmy.aiagent.model.MessageRole
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
@@ -62,7 +63,10 @@ class OpenAiProviderStreamingTest {
                     messages = listOf(ChatMessage(role = MessageRole.USER, content = "call echo")),
                     modelId = "test-model",
                 ),
-            ).toList()
+            ).transformWhile { event ->
+                emit(event)
+                event !is GenerationEvent.GenerationCompleted
+            }.toList()
         }
 
         val started = events.filterIsInstance<GenerationEvent.ToolCallStarted>()
