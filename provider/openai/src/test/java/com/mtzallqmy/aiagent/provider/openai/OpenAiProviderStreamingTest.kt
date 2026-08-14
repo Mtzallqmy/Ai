@@ -10,6 +10,7 @@ import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -34,6 +35,7 @@ class OpenAiProviderStreamingTest {
     fun `stream completes and keeps tool id across argument chunks`() = runTest {
         server.enqueue(
             MockResponse()
+                .setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
                 .setHeader("Content-Type", "text/event-stream")
                 .setBody(
                     """
