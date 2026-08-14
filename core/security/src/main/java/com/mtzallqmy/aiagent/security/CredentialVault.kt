@@ -32,7 +32,7 @@ import kotlin.random.Random
  */
 class CredentialVault(
     context: Context,
-    @VisibleForTesting internal val keystore: KeystoreGateway = AndroidKeystoreGateway(),
+    @get:VisibleForTesting internal val keystore: KeystoreGateway = AndroidKeystoreGateway(),
 ) {
     private val appContext = context.applicationContext
 
@@ -146,7 +146,7 @@ interface KeystoreGateway {
 }
 
 internal class AndroidKeystoreGateway(
-    @VisibleForTesting private val strongBoxAvailable: Boolean = detectStrongBox(),
+    @get:VisibleForTesting private val strongBoxAvailable: Boolean = detectStrongBox(),
 ) : KeystoreGateway {
     override fun loadOrCreateKey(alias: String): SecretKey {
         val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -163,7 +163,9 @@ internal class AndroidKeystoreGateway(
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(CredentialVault.CIPHER_KEY_SIZE)
-        if (strongBoxAvailable) builder.setIsStrongBoxBacked(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && strongBoxAvailable) {
+            builder.setIsStrongBoxBacked(true)
+        }
         generator.init(builder.build())
         return generator.generateKey()
     }

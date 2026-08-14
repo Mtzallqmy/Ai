@@ -147,7 +147,8 @@ fun SettingsScreen(
     vault: CredentialVault?,
     modifier: Modifier = Modifier,
 ) {
-    val arabic by (settings?.arabicLocale?.collectAsState(initial = false) ?: mutableStateOf(false))
+    val arabic by (settings?.arabicLocale?.collectAsState(initial = false)
+        ?: remember { mutableStateOf(false) })
     Column(modifier = modifier.fillMaxSize()) {
         TopAppBar(title = { Text(stringResource(R.string.tab_settings)) })
         Column(modifier = Modifier.padding(16.dp)) {

@@ -4,6 +4,7 @@
     <string name="tab_chat">Agent</string>
     <string name="tab_tools">Tools</string>
     <string name="tab_providers">Providers</string>
+    <string name="tab_local_models">Local Models</string>
     <string name="tab_security">Security</string>
     <string name="tab_settings">Settings</string>
     <string name="tab_logs">Logs</string>

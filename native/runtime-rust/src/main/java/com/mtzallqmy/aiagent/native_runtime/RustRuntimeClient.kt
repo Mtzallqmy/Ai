@@ -31,7 +31,20 @@ class RustRuntimeClient(private val context: Context) : AutoCloseable {
                     service = null
                 }
 
+                override fun onBindingDied(name: ComponentName?) {
+                    service = null
+                    if (connection === this) {
+                        runCatching { context.unbindService(this) }
+                        connection = null
+                    }
+                }
+
                 override fun onNullBinding(name: ComponentName?) {
+                    service = null
+                    if (connection === this) {
+                        runCatching { context.unbindService(this) }
+                        connection = null
+                    }
                     if (continuation.isActive) continuation.resumeWithException(
                         IllegalStateException("Rust runtime service returned a null binding"),
                     )

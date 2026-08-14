@@ -29,8 +29,10 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
 ) {
     val viewModel = remember(runtime, tools) { runtime?.let { ChatViewModel(it, tools) } }
-    val messages by (viewModel?.messages?.collectAsState() ?: mutableStateOf(emptyList()))
-    val state by (viewModel?.state?.collectAsState() ?: mutableStateOf(AgentState.IDLE))
+    val messages by (viewModel?.messages?.collectAsState()
+        ?: remember { mutableStateOf(emptyList()) })
+    val state by (viewModel?.state?.collectAsState()
+        ?: remember { mutableStateOf(AgentState.IDLE) })
 
     var input by remember { mutableStateOf("") }
     var selectedProvider by remember { mutableStateOf("openai") }
