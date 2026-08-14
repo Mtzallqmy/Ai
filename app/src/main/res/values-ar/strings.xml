@@ -4,6 +4,7 @@
     <string name="tab_chat">الوكيل</string>
     <string name="tab_tools">الأدوات</string>
     <string name="tab_providers">المزودون</string>
+    <string name="tab_local_models">النماذج المحلية</string>
     <string name="tab_security">الأمان</string>
     <string name="tab_settings">الإعدادات</string>
     <string name="tab_logs">السجلات</string>
