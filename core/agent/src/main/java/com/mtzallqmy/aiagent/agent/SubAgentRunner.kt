@@ -260,7 +260,15 @@ class SubAgentRunner(
         }
 
         val result = try {
-            check(runtime.runTask(task, spec.modelId, spec.agentId, delegatedTools, runId) != null)
+            check(
+                runtime.runTask(
+                    task = task,
+                    modelId = spec.modelId,
+                    agentId = spec.agentId,
+                    tools = delegatedTools,
+                    runId = runId,
+                ) != null,
+            )
             started.complete(Unit)
             val terminalState = runtime.state.filter(::isTerminal).first()
             val record = requireNotNull(runtime.run.value)

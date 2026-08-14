@@ -8,8 +8,11 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -29,9 +32,10 @@ open class OpenAiCompatibleProvider(
     private val authHeaderValueProvider: (String?) -> String = { key -> "Bearer ${key.orEmpty()}" },
     private val extraHeadersProvider: () -> Map<String, String> = { emptyMap() },
     private val defaultModel: String = "",
+    private val allowPrivateNetwork: Boolean = false,
 ) : AiProvider {
 
-    protected val client = SafeHttpClient.create()
+    protected val client = SafeHttpClient.create(allowPrivateNetwork = allowPrivateNetwork)
     protected val json = Json { ignoreUnknownKeys = true }
 
     protected open suspend fun completionsEndpoint(): String {
@@ -45,7 +49,7 @@ open class OpenAiCompatibleProvider(
     }
     override suspend fun listModels(): Result<List<AiModel>> = withContext(Dispatchers.IO) {
         try {
-            val base = baseUrlProvider() ?: error("No base URL configured")
+            val base = baseUrlProvider() ?: throw ProviderError.ConfigurationError("Base URL not configured")
             val key = apiKeyProvider()
             val req = Request.Builder()
                 .url(modelsEndpoint())
@@ -111,65 +115,130 @@ open class OpenAiCompatibleProvider(
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = callbackFlow {
         val base = baseUrlProvider()
         val key = apiKeyProvider()
-        if (base == null) {
-            trySend(GenerationEvent.GenerationFailed(ProviderError.ProviderError_(500, "Base URL not configured")))
-            close(); return@callbackFlow
+        if (base.isNullOrBlank()) {
+            trySend(GenerationEvent.GenerationFailed(ProviderError.ConfigurationError("Base URL not configured")))
+            close()
+            return@callbackFlow
         }
         val payload = buildPayload(request)
-        val req = Request.Builder()
-            .url(completionsEndpoint())
-            .header(authHeaderName, authHeaderValueProvider(key))
-            .header("Content-Type", "application/json")
-            .post(payload.toRequestBody("application/json".toMediaType()))
-            .apply { extraHeadersProvider().forEach { (k, v) -> header(k, v) } }
-            .build()
-        val response = client.newCall(req).execute()
-        if (!response.isSuccessful) {
-            trySend(GenerationEvent.GenerationFailed(mapHttpError(response.code)))
-            response.close(); close(); return@callbackFlow
+        val req = runCatching {
+            Request.Builder()
+                .url(completionsEndpoint())
+                .header(authHeaderName, authHeaderValueProvider(key))
+                .header("Content-Type", "application/json")
+                .post(payload.toRequestBody("application/json".toMediaType()))
+                .apply { extraHeadersProvider().forEach { (name, value) -> header(name, value) } }
+                .build()
+        }.getOrElse { error ->
+            trySend(GenerationEvent.GenerationFailed(mapError(error)))
+            close()
+            return@callbackFlow
         }
-        try {
-            response.body?.source()?.let { source ->
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") {
-                        trySend(GenerationEvent.GenerationCompleted(""))
-                        break
+        val call = client.newCall(req)
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (!call.isCanceled()) trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                close()
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        trySend(GenerationEvent.GenerationFailed(mapHttpError(resp.code)))
+                        close()
+                        return
                     }
-                    val chunk = try {
-                        json.decodeFromString<CompatibleChunk>(data)
-                    } catch (e: Exception) { continue }
-                    chunk.usage?.let { u ->
-                        trySend(GenerationEvent.Usage(u.promptTokens ?: 0, u.completionTokens ?: 0))
+                    var terminalSent = false
+                    val toolIdsByIndex = mutableMapOf<Int, String>()
+                    val startedToolIndices = mutableSetOf<Int>()
+                    fun completeOnce() {
+                        if (!terminalSent) {
+                            terminalSent = true
+                            trySend(GenerationEvent.GenerationCompleted(""))
+                        }
                     }
-                    val choice = chunk.choices.firstOrNull() ?: continue
-                    val delta = choice.delta
-                    delta.content?.let { if (it.isNotEmpty()) trySend(GenerationEvent.TextDelta(it)) }
-                    val tools = delta.toolCalls ?: emptyList()
-                    for (tc in tools) {
-                        trySend(GenerationEvent.ToolCallStarted(tc.id ?: "", tc.function?.name ?: ""))
-                        tc.function?.arguments?.let { trySend(GenerationEvent.ToolCallArgumentsDelta(tc.id ?: "", it)) }
+                    try {
+                        resp.body?.source()?.let { source ->
+                            while (!source.exhausted() && !call.isCanceled()) {
+                                val line = source.readUtf8Line() ?: break
+                                if (!line.startsWith("data:")) continue
+                                val data = line.removePrefix("data:").trim()
+                                if (data == "[DONE]") {
+                                    completeOnce()
+                                    break
+                                }
+                                val chunk = runCatching { json.decodeFromString<CompatibleChunk>(data) }
+                                    .getOrNull() ?: continue
+                                chunk.usage?.let { usage ->
+                                    trySend(GenerationEvent.Usage(usage.promptTokens ?: 0, usage.completionTokens ?: 0))
+                                }
+                                val choice = chunk.choices.firstOrNull() ?: continue
+                                val delta = choice.delta
+                                delta.content?.takeIf { it.isNotEmpty() }?.let {
+                                    trySend(GenerationEvent.TextDelta(it))
+                                }
+                                for (toolCall in delta.toolCalls.orEmpty()) {
+                                    val index = toolCall.index ?: 0
+                                    val functionName = toolCall.function?.name
+                                    val effectiveId = toolCall.id
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.also { toolIdsByIndex[index] = it }
+                                        ?: toolIdsByIndex[index]
+                                        ?: "compatible-tool-$index".also { toolIdsByIndex[index] = it }
+                                    if (index !in startedToolIndices && !functionName.isNullOrBlank()) {
+                                        startedToolIndices += index
+                                        trySend(GenerationEvent.ToolCallStarted(effectiveId, functionName))
+                                    }
+                                    toolCall.function?.arguments?.takeIf { it.isNotEmpty() }?.let { args ->
+                                        trySend(GenerationEvent.ToolCallArgumentsDelta(effectiveId, args))
+                                    }
+                                }
+                                if (choice.finishReason != null) completeOnce()
+                            }
+                        }
+                        if (!call.isCanceled()) completeOnce()
+                    } catch (error: Exception) {
+                        if (!call.isCanceled()) trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                    } finally {
+                        close()
                     }
-                    if (choice.finishReason != null) trySend(GenerationEvent.GenerationCompleted(""))
                 }
             }
-        } catch (e: Exception) {
-            trySend(GenerationEvent.GenerationFailed(mapError(e)))
-        } finally {
-            response.close()
-        }
-        awaitClose { response.close() }
+        })
+        awaitClose { call.cancel() }
     }
 
     protected open fun buildPayload(request: GenerationRequest): String {
         val sb = StringBuilder()
-        sb.append("{\"model\":\"").append(request.modelId.ifEmpty { defaultModel }).append("\",\"messages\":")
+        sb.append("{\"model\":").append(jsonString(request.modelId.ifEmpty { defaultModel })).append(",\"messages\":")
         sb.append("[")
         request.messages.forEachIndexed { idx, m ->
             if (idx > 0) sb.append(",")
-            sb.append("{\"role\":\"").append(m.role.name.lowercase()).append("\",\"content\":").append(jsonString(m.content)).append("}")
+            when {
+                m.role == MessageRole.TOOL && !m.toolCallId.isNullOrBlank() -> {
+                    sb.append("{\"role\":\"tool\",\"tool_call_id\":")
+                        .append(jsonString(m.toolCallId))
+                        .append(",\"content\":").append(jsonString(m.content)).append("}")
+                }
+                m.role == MessageRole.ASSISTANT && m.toolCalls.isNotEmpty() -> {
+                    sb.append("{\"role\":\"assistant\",\"content\":")
+                        .append(jsonString(m.content))
+                        .append(",\"tool_calls\":[")
+                    m.toolCalls.forEachIndexed { toolIndex, call ->
+                        if (toolIndex > 0) sb.append(",")
+                        sb.append("{\"id\":").append(jsonString(call.id))
+                            .append(",\"type\":\"function\",\"function\":{\"name\":")
+                            .append(jsonString(call.name))
+                            .append(",\"arguments\":").append(jsonString(call.arguments)).append("}}")
+                    }
+                    sb.append("]}")
+                }
+                else -> {
+                    val role = if (m.role == MessageRole.TOOL) "user" else m.role.name.lowercase()
+                    sb.append("{\"role\":").append(jsonString(role))
+                        .append(",\"content\":").append(jsonString(m.content)).append("}")
+                }
+            }
         }
         sb.append("],\"temperature\":").append(request.temperature).append(",\"stream\":true")
         request.maxTokens?.let { sb.append(",\"max_tokens\":").append(it) }
@@ -178,8 +247,8 @@ open class OpenAiCompatibleProvider(
             sb.append("[")
             request.tools.forEachIndexed { idx, t ->
                 if (idx > 0) sb.append(",")
-                sb.append("{\"type\":\"function\",\"function\":{\"name\":\"").append(t.id).append("\",\"description\":").append(jsonString(t.description)).append(",\"parameters\":")
-                sb.append(t.inputSchema.ifBlank { "{\"type\":\"object\",\"properties\":{}}" })
+                sb.append("{\"type\":\"function\",\"function\":{\"name\":").append(jsonString(t.id)).append(",\"description\":").append(jsonString(t.description)).append(",\"parameters\":")
+                sb.append(safeSchema(t.inputSchema))
                 sb.append("}}")
             }
             sb.append("]")
@@ -187,6 +256,10 @@ open class OpenAiCompatibleProvider(
         sb.append("}")
         return sb.toString()
     }
+
+    protected fun safeSchema(raw: String): String = runCatching {
+        json.parseToJsonElement(raw.ifBlank { "{\"type\":\"object\",\"properties\":{}}" }).toString()
+    }.getOrDefault("{\"type\":\"object\",\"properties\":{}}")
 
     protected fun jsonString(s: String): String = buildString {
         append('"')
@@ -226,13 +299,13 @@ private data class CompatibleChunk(
 @Serializable
 private data class CompatibleChoice(
     val delta: CompatibleDelta = CompatibleDelta(),
-    val finishReason: String? = null,
+    @SerialName("finish_reason") val finishReason: String? = null,
 )
 
 @Serializable
 private data class CompatibleDelta(
     val content: String? = null,
-    val toolCalls: List<CompatibleToolCall>? = null,
+    @SerialName("tool_calls") val toolCalls: List<CompatibleToolCall>? = null,
 )
 
 @Serializable
@@ -250,6 +323,6 @@ private data class CompatibleFunction(
 
 @Serializable
 private data class CompatibleUsage(
-    val promptTokens: Int? = null,
-    val completionTokens: Int? = null,
+    @SerialName("prompt_tokens") val promptTokens: Int? = null,
+    @SerialName("completion_tokens") val completionTokens: Int? = null,
 )

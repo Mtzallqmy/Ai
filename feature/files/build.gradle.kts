@@ -37,10 +37,4 @@ android {
     implementation(project(":core:ui"))
     implementation(project(":core:workspace"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

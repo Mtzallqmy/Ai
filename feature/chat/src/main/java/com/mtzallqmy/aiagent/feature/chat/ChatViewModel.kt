@@ -1,20 +1,27 @@
 package com.mtzallqmy.aiagent.feature.chat
 
 import com.mtzallqmy.aiagent.agent.AgentRuntime
-import com.mtzallqmy.aiagent.model.*
+import com.mtzallqmy.aiagent.model.AgentState
+import com.mtzallqmy.aiagent.model.ChatMessage
+import com.mtzallqmy.aiagent.model.GenerationEvent
+import com.mtzallqmy.aiagent.model.MessageRole
+import com.mtzallqmy.aiagent.model.RoutingHint
+import com.mtzallqmy.aiagent.model.RunTimelineEntry
 import com.mtzallqmy.aiagent.tools.RegisteredTool
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import java.util.UUID
 
 /**
- * Chat feature state: real streaming from AgentRuntime; tool calls, retries,
- * stop — all wired to the runtime. UI text comes from string resources.
+ * Chat presentation state backed by the real [AgentRuntime].
+ *
+ * Runtime flows are collected exactly once for the lifetime of this controller.
+ * Re-subscribing on every send previously duplicated streamed deltas/tool events
+ * and leaked collectors for as long as the process stayed alive.
  */
 class ChatViewModel(
     private val runtime: AgentRuntime,
@@ -32,64 +39,133 @@ class ChatViewModel(
     private val _timeline = MutableStateFlow<List<RunTimelineEntry>>(emptyList())
     val timeline: StateFlow<List<RunTimelineEntry>> = _timeline
 
-    fun send(text: String, tools: List<RegisteredTool> = availableTools, modelId: String = "") {
-        if (text.isBlank()) return
-        _messages.value += ChatMessage(role = MessageRole.USER, content = text)
-        _messages.value += ChatMessage(role = MessageRole.ASSISTANT, content = "")
-        runtime.runTask(task = text, modelId = modelId, tools = tools)
-        observeRun()
+    /** Only one AgentRuntime run can be active, so one assistant slot owns incoming deltas. */
+    private val activeAssistantIndex = AtomicInteger(NO_ACTIVE_MESSAGE)
+    private var lastModelId: String = ""
+    private var lastProviderId: String? = null
+
+    init {
+        observeRuntimeOnce()
     }
 
-    private fun observeRun() {
+    /**
+     * Starts a run and returns false when the runtime is already busy.
+     * The optimistic message pair is rolled back when start is rejected.
+     */
+    fun send(
+        text: String,
+        tools: List<RegisteredTool> = availableTools,
+        modelId: String = "",
+        requestedProviderId: String? = null,
+    ): Boolean {
+        val task = text.trim()
+        if (task.isBlank()) return false
+
+        val before = _messages.value
+        val assistantIndex = before.size + 1
+        _messages.value = before +
+            ChatMessage(role = MessageRole.USER, content = task) +
+            ChatMessage(role = MessageRole.ASSISTANT, content = "")
+        activeAssistantIndex.set(assistantIndex)
+
+        val runId = runtime.runTask(
+            task = task,
+            modelId = modelId,
+            tools = tools,
+            history = before,
+            routingHint = RoutingHint(requestedProviderId = requestedProviderId),
+        )
+        if (runId == null) {
+            activeAssistantIndex.set(NO_ACTIVE_MESSAGE)
+            _messages.value = before
+            return false
+        }
+        lastModelId = modelId
+        lastProviderId = requestedProviderId
+        return true
+    }
+
+    private fun observeRuntimeOnce() {
         uiScope.launch {
-            runtime.state.collect { st ->
-                _state.value = st
-                if (st == AgentState.COMPLETED || st == AgentState.FAILED || st == AgentState.CANCELLED) {
-                    // finalize: fill last assistant message with final response
-                }
+            runtime.state.collect { state ->
+                _state.value = state
             }
         }
         uiScope.launch {
             runtime.events.collect { event ->
                 when (event) {
-                    is GenerationEvent.TextDelta -> {
-                        val current = _messages.value.toMutableList()
-                        val last = current.last()
-                        current[current.lastIndex] = ChatMessage(role = MessageRole.ASSISTANT, content = last.content + event.text)
-                        _messages.value = current
-                    }
+                    is GenerationEvent.TextDelta -> appendAssistant(event.text)
                     is GenerationEvent.ToolCallStarted -> {
                         _timeline.value += RunTimelineEntry(
-                            runId = runtime.run.value?.runId ?: "",
+                            runId = runtime.run.value?.runId.orEmpty(),
                             label = "tool:${event.toolName}",
                             startedAt = System.currentTimeMillis(),
                         )
                     }
-                    is GenerationEvent.GenerationFailed -> {
-                        val current = _messages.value.toMutableList()
-                        current[current.lastIndex] = ChatMessage(role = MessageRole.ASSISTANT, content = "Error: ${event.error}")
-                        _messages.value = current
+                    is GenerationEvent.GenerationCompleted -> {
+                        // Some providers may not emit text deltas. Preserve a useful final
+                        // response in that case instead of leaving an empty assistant bubble.
+                        if (event.finalText.isNotBlank()) {
+                            replaceAssistantIfBlank(event.finalText)
+                        }
+                        activeAssistantIndex.set(NO_ACTIVE_MESSAGE)
                     }
-                    else -> {}
+                    is GenerationEvent.GenerationFailed -> {
+                        replaceAssistant("Error: ${event.error.message ?: "Generation failed"}")
+                        activeAssistantIndex.set(NO_ACTIVE_MESSAGE)
+                    }
+                    else -> Unit
                 }
             }
         }
+    }
+
+    private fun appendAssistant(delta: String) {
+        if (delta.isEmpty()) return
+        updateAssistant { it + delta }
+    }
+
+    private fun replaceAssistantIfBlank(text: String) {
+        updateAssistant { current -> if (current.isBlank()) text else current }
+    }
+
+    private fun replaceAssistant(text: String) {
+        updateAssistant { text }
+    }
+
+    private inline fun updateAssistant(transform: (String) -> String) {
+        val index = activeAssistantIndex.get()
+        val current = _messages.value.toMutableList()
+        if (index !in current.indices || current[index].role != MessageRole.ASSISTANT) return
+        current[index] = current[index].copy(content = transform(current[index].content))
+        _messages.value = current
     }
 
     fun stop() {
         runtime.cancel()
     }
 
-    fun resend() {
-        val lastUser = _messages.value.filter { it.role == MessageRole.USER }.lastOrNull() ?: return
-        val trimmed = _messages.value.dropLast(2)
-        _messages.value = trimmed
-        send(lastUser.content)
+    fun resend(): Boolean {
+        val current = _messages.value
+        val lastUserIndex = current.indexOfLast { it.role == MessageRole.USER }
+        if (lastUserIndex < 0) return false
+        val lastUser = current[lastUserIndex]
+        _messages.value = current.take(lastUserIndex)
+        return send(
+            lastUser.content,
+            modelId = lastModelId,
+            requestedProviderId = lastProviderId,
+        )
     }
 
     fun editMessage(index: Int, text: String) {
         val current = _messages.value.toMutableList()
-        if (index in current.indices) current[index] = ChatMessage(role = MessageRole.USER, content = text)
+        if (index !in current.indices || current[index].role != MessageRole.USER) return
+        current[index] = current[index].copy(content = text)
         _messages.value = current
+    }
+
+    private companion object {
+        const val NO_ACTIVE_MESSAGE = -1
     }
 }

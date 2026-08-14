@@ -43,10 +43,4 @@ android {
     implementation(project(":provider:openrouter"))
     implementation(project(":core:agent"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

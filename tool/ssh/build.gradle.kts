@@ -32,10 +32,4 @@ dependencies {
     implementation(project(":core:network"))
     implementation(project(":core:tools"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

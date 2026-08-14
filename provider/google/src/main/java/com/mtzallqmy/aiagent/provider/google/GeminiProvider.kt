@@ -13,6 +13,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -32,9 +34,10 @@ class GeminiProvider(
     private val json = Json { ignoreUnknownKeys = true }
     override suspend fun listModels(): Result<List<AiModel>> = withContext(Dispatchers.IO) {
         try {
-            val key = apiKeyProvider() ?: error("No API key")
+            val key = apiKeyProvider() ?: throw ProviderError.AuthenticationError("No Gemini API key")
             val request = Request.Builder()
-                .url("https://generativelanguage.googleapis.com/v1beta/models?key=$key")
+                .url("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", key)
                 .build()
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) error("HTTP ${resp.code}")
@@ -46,6 +49,12 @@ class GeminiProvider(
                     val inputTokens = m.inputTokenLimit ?: 0
                     val outputTokens = m.outputTokenLimit ?: 0
                     val supportsGenContent = m.supportedGenerationMethods?.contains("generateContent") == true
+                    val lowerId = id.lowercase()
+                    // The Models endpoint exposes generateContent support but not a reliable
+                    // per-model function-calling flag. Stay conservative for media-only variants
+                    // instead of advertising tool calling that the endpoint can reject at runtime.
+                    val mediaOnlyVariant = listOf("image", "tts", "audio", "embedding").any(lowerId::contains)
+                    val supportsToolCalling = supportsGenContent && lowerId.startsWith("gemini-") && !mediaOnlyVariant
                     if (!supportsGenContent) null
                     else AiModel(
                         id = id,
@@ -54,9 +63,9 @@ class GeminiProvider(
                         capabilities = ModelCapabilities(
                             chat = true,
                             streaming = true,
-                            toolCalling = m.supportedGenerationMethods?.contains("generateContent") == true,
-                            vision = id.contains("gemini", ignoreCase = true) && !id.endsWith("nano"),
-                            reasoning = id.contains("gemini-2.5-pro", ignoreCase = true),
+                            toolCalling = supportsToolCalling,
+                            vision = lowerId.startsWith("gemini-") && !listOf("tts", "audio", "embedding").any(lowerId::contains),
+                            reasoning = lowerId.startsWith("gemini-2.5") || lowerId.startsWith("gemini-3"),
                             contextWindow = inputTokens,
                             maxOutputTokens = outputTokens,
                         ),
@@ -74,10 +83,11 @@ class GeminiProvider(
     override suspend fun testConnection(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val key = apiKeyProvider() ?: throw ProviderError.AuthenticationError("No Gemini API key")
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$defaultModel:generateContent?key=$key"
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$defaultModel:generateContent"
             val body = """{"contents":[{"parts":[{"text":"ping"}]}]}"""
             val request = Request.Builder()
                 .url(url)
+                .header("x-goog-api-key", key)
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
             client.newCall(request).execute().use { resp ->
@@ -94,64 +104,100 @@ class GeminiProvider(
 
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = callbackFlow {
         val key = apiKeyProvider()
-        if (key == null) {
+        if (key.isNullOrBlank()) {
             trySend(GenerationEvent.GenerationFailed(ProviderError.AuthenticationError("No Gemini API key")))
-            close(); return@callbackFlow
+            close()
+            return@callbackFlow
         }
         val model = request.modelId.ifEmpty { defaultModel }
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse&key=$key"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse"
         val payload = buildPayload(request)
         val req = Request.Builder()
             .url(url)
+            .header("x-goog-api-key", key)
             .header("Content-Type", "application/json")
             .post(payload.toRequestBody("application/json".toMediaType()))
             .build()
-        val response = client.newCall(req).execute()
-        if (!response.isSuccessful) {
-            trySend(GenerationEvent.GenerationFailed(mapHttpError(response.code)))
-            response.close(); close(); return@callbackFlow
-        }
-        try {
-            response.body?.source()?.let { source ->
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    val obj = try {
-                        json.parseToJsonElement(data).toString()
-                    } catch (e: Exception) { continue }
-                    // Extract text parts from the response object
+        val call = client.newCall(req)
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (!call.isCanceled()) trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                close()
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        trySend(GenerationEvent.GenerationFailed(mapHttpError(resp.code)))
+                        close()
+                        return
+                    }
+                    var terminalSent = false
+                    val toolCallIds = mutableMapOf<String, String>()
+                    var inputTokensReported = 0
+                    var outputTokensReported = 0
+                    fun completeOnce() {
+                        if (!terminalSent) {
+                            terminalSent = true
+                            trySend(GenerationEvent.GenerationCompleted(""))
+                        }
+                    }
                     try {
-                        val root = kotlinx.serialization.json.Json.parseToJsonElement(data)
-                        val candidates = (root as? kotlinx.serialization.json.JsonObject)?.get("candidates")
-                            ?.let { (it as? kotlinx.serialization.json.JsonArray)?.firstOrNull() } as? kotlinx.serialization.json.JsonObject
-                        candidates?.get("content")?.let { content ->
-                            val parts = (content as? kotlinx.serialization.json.JsonObject)?.get("parts") as? kotlinx.serialization.json.JsonArray
-                            parts?.forEach { part ->
-                                val text = (part as? kotlinx.serialization.json.JsonObject)?.get("text")?.jsonPrimitive?.content
-                                if (!text.isNullOrBlank()) trySend(GenerationEvent.TextDelta(text))
+                        resp.body?.source()?.let { source ->
+                            while (!source.exhausted() && !call.isCanceled()) {
+                                val line = source.readUtf8Line() ?: break
+                                if (!line.startsWith("data:")) continue
+                                val data = line.removePrefix("data:").trim()
+                                val root = runCatching { json.parseToJsonElement(data) as? kotlinx.serialization.json.JsonObject }
+                                    .getOrNull() ?: continue
+                                val candidate = (root["candidates"] as? kotlinx.serialization.json.JsonArray)
+                                    ?.firstOrNull() as? kotlinx.serialization.json.JsonObject
+                                val parts = (candidate?.get("content") as? kotlinx.serialization.json.JsonObject)
+                                    ?.get("parts") as? kotlinx.serialization.json.JsonArray
+                                parts?.forEachIndexed { partIndex, partElement ->
+                                    val part = partElement as? kotlinx.serialization.json.JsonObject ?: return@forEachIndexed
+                                    part["text"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }?.let { text ->
+                                        trySend(GenerationEvent.TextDelta(text))
+                                    }
+                                    val functionCall = part["functionCall"] as? kotlinx.serialization.json.JsonObject
+                                    val functionName = functionCall?.get("name")?.jsonPrimitive?.content
+                                    if (!functionName.isNullOrBlank()) {
+                                        val key = "$partIndex:$functionName"
+                                        val isNew = key !in toolCallIds
+                                        val callId = toolCallIds.getOrPut(key) { "gemini-tool-${toolCallIds.size}" }
+                                        if (isNew) {
+                                            trySend(GenerationEvent.ToolCallStarted(callId, functionName))
+                                            val args = functionCall["args"] ?: buildJsonObject { }
+                                            trySend(GenerationEvent.ToolCallArgumentsDelta(callId, args.toString()))
+                                        }
+                                    }
+                                }
+                                candidate?.get("finishReason")?.jsonPrimitive?.content?.let { reason ->
+                                    if (reason == "STOP" || reason == "MAX_TOKENS") completeOnce()
+                                }
+                                (root["usageMetadata"] as? kotlinx.serialization.json.JsonObject)?.let { usage ->
+                                    val promptTotal = usage["promptTokenCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: inputTokensReported
+                                    val completionTotal = usage["candidatesTokenCount"]?.jsonPrimitive?.content?.toIntOrNull() ?: outputTokensReported
+                                    val promptDelta = (promptTotal - inputTokensReported).coerceAtLeast(0)
+                                    val completionDelta = (completionTotal - outputTokensReported).coerceAtLeast(0)
+                                    if (promptDelta > 0 || completionDelta > 0) {
+                                        trySend(GenerationEvent.Usage(promptDelta, completionDelta))
+                                    }
+                                    inputTokensReported = maxOf(inputTokensReported, promptTotal)
+                                    outputTokensReported = maxOf(outputTokensReported, completionTotal)
+                                }
                             }
                         }
-                        candidates?.get("finishReason")?.let {
-                            val reason = it.jsonPrimitive.content
-                            if (reason == "STOP" || reason == "MAX_TOKENS") trySend(GenerationEvent.GenerationCompleted(""))
-                        }
-                        (root as? kotlinx.serialization.json.JsonObject)?.get("usageMetadata")?.let { u ->
-                            val prompt = (u as? kotlinx.serialization.json.JsonObject)?.get("promptTokenCount")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                            val completion = (u as? kotlinx.serialization.json.JsonObject)?.get("candidatesTokenCount")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                            trySend(GenerationEvent.Usage(prompt, completion))
-                        }
-                    } catch (e: Exception) {
-                        // Continue on parse hiccups; errors surface through finishReason blocks
+                        if (!call.isCanceled()) completeOnce()
+                    } catch (error: Exception) {
+                        if (!call.isCanceled()) trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                    } finally {
+                        close()
                     }
                 }
             }
-        } catch (e: Exception) {
-            trySend(GenerationEvent.GenerationFailed(mapError(e)))
-        } finally {
-            response.close()
-        }
-        awaitClose { response.close() }
+        })
+        awaitClose { call.cancel() }
     }
 
     private fun buildPayload(request: GenerationRequest): String {
@@ -162,8 +208,32 @@ class GeminiProvider(
         sb.append("[")
         chatMessages.forEachIndexed { idx, m ->
             if (idx > 0) sb.append(",")
-            val role = if (m.role == MessageRole.TOOL) "user" else if (m.role == MessageRole.ASSISTANT) "model" else "user"
-            sb.append("{\"role\":\"").append(role).append("\",\"parts\":[{\"text\":").append(jsonString(m.content)).append("}]}")
+            when {
+                m.role == MessageRole.TOOL && !m.toolName.isNullOrBlank() -> {
+                    sb.append("{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":")
+                        .append(jsonString(m.toolName))
+                        .append(",\"response\":{\"output\":").append(jsonString(m.content)).append("}}}]}")
+                }
+                m.role == MessageRole.ASSISTANT && m.toolCalls.isNotEmpty() -> {
+                    sb.append("{\"role\":\"model\",\"parts\":[")
+                    var partIndex = 0
+                    if (m.content.isNotBlank()) {
+                        sb.append("{\"text\":").append(jsonString(m.content)).append("}")
+                        partIndex++
+                    }
+                    m.toolCalls.forEach { call ->
+                        if (partIndex++ > 0) sb.append(",")
+                        sb.append("{\"functionCall\":{\"name\":").append(jsonString(call.name))
+                            .append(",\"args\":").append(safeArguments(call.arguments)).append("}}")
+                    }
+                    sb.append("]}")
+                }
+                else -> {
+                    val role = if (m.role == MessageRole.ASSISTANT) "model" else "user"
+                    sb.append("{\"role\":").append(jsonString(role))
+                        .append(",\"parts\":[{\"text\":").append(jsonString(m.content)).append("}]}")
+                }
+            }
         }
         sb.append("]")
         system?.let { sb.append(",\"systemInstruction\":{\"parts\":[{\"text\":").append(jsonString(it)).append("}]}") }
@@ -171,8 +241,8 @@ class GeminiProvider(
             sb.append(",\"tools\":[{\"functionDeclarations\":[")
             request.tools.forEachIndexed { idx, t ->
                 if (idx > 0) sb.append(",")
-                sb.append("{\"name\":\"").append(t.id).append("\",\"description\":").append(jsonString(t.description)).append(",\"parameters\":")
-                sb.append(t.inputSchema.ifBlank { "{\"type\":\"object\",\"properties\":{}}" })
+                sb.append("{\"name\":").append(jsonString(t.id)).append(",\"description\":").append(jsonString(t.description)).append(",\"parameters\":")
+                sb.append(safeSchema(t.inputSchema))
                 sb.append("}")
             }
             sb.append("]}]")
@@ -180,6 +250,15 @@ class GeminiProvider(
         sb.append("}")
         return sb.toString()
     }
+
+    private fun safeSchema(raw: String): String = runCatching {
+        json.parseToJsonElement(raw.ifBlank { DEFAULT_TOOL_SCHEMA }).toString()
+    }.getOrDefault(DEFAULT_TOOL_SCHEMA)
+
+    private fun safeArguments(raw: String): String = runCatching {
+        val parsed = json.parseToJsonElement(raw.ifBlank { "{}" })
+        if (parsed is kotlinx.serialization.json.JsonObject) parsed.toString() else "{}"
+    }.getOrDefault("{}")
 
     private fun jsonString(s: String): String = buildString {
         append('"')
@@ -201,6 +280,10 @@ class GeminiProvider(
         is ProviderError -> e
         is IOException -> ProviderError.NetworkError(e.message ?: "Network failure")
         else -> ProviderError.ProviderError_(500, e.message ?: "Gemini error")
+    }
+
+    private companion object {
+        const val DEFAULT_TOOL_SCHEMA = "{\"type\":\"object\",\"properties\":{}}"
     }
 }
 

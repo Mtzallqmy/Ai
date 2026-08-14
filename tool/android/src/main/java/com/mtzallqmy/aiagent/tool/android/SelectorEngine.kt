@@ -127,8 +127,8 @@ class VerificationLoop(
         expectedState: (UiNode) -> Boolean,
         sleep: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     ): Boolean {
+        action()
         repeat(maxAttempts) {
-            action()
             sleep(delayMs)
             val after = treeProvider()
             if (after != null && expectedState(after)) return true

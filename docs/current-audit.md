@@ -1,5 +1,8 @@
 # Current Audit — Aegis AI Agent OS (state before hardening)
 
+> **ARCHIVED SNAPSHOT:** هذا الملف يوثق مرحلة أقدم من المشروع ولا يمثل الحالة الحالية. استخدم `README.md` و`docs/REPAIR_AND_VERIFICATION_REPORT_AR.md` ونتائج CI الحالية كمصدر للحالة الراهنة.
+
+
 **Method:** direct inspection of source files in this repository (not README, not plans, not commit messages). All findings reference actual files and line counts.
 
 **Snapshot:** 37 Gradle modules, 48 main Kotlin sources (~4,930 LOC), 25 passing JUnit tests, build green (debug + release, versionCode 64).

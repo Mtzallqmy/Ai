@@ -92,6 +92,7 @@ object ProviderPresets {
             apiKeyProvider = apiKeyProvider, authHeaderName = "Authorization",
             authHeaderValueProvider = { key -> "Bearer ${key.orEmpty()}" },
             defaultModel = "llama3",
+            allowPrivateNetwork = true,
         )
 
     /** LM Studio local server (http://localhost:1234/v1 by default). */
@@ -102,6 +103,7 @@ object ProviderPresets {
             apiKeyProvider = apiKeyProvider, authHeaderName = "Authorization",
             authHeaderValueProvider = { key -> "Bearer ${key.orEmpty()}" },
             defaultModel = "local-model",
+            allowPrivateNetwork = true,
         )
 
     /** llama.cpp server (OpenAI-compatible mode; http://localhost:8080/v1 by default). */
@@ -112,5 +114,6 @@ object ProviderPresets {
             apiKeyProvider = apiKeyProvider, authHeaderName = "Authorization",
             authHeaderValueProvider = { key -> "Bearer ${key.orEmpty()}" },
             defaultModel = "local-model",
+            allowPrivateNetwork = true,
         )
 }

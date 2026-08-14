@@ -172,12 +172,19 @@ fun ErrorCard(message: String, onRetry: (() -> Unit)? = null, modifier: Modifier
     }
 }
 
-/** Status chip used in Security Center. */
+/** Non-interactive status badge used for state display. */
 @Composable
 fun StatusChip(text: String, modifier: Modifier = Modifier) {
-    AssistChip(
-        onClick = {},
-        label = { Text(text, fontSize = 11.sp) },
+    Surface(
         modifier = modifier,
-    )
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+    ) {
+        Text(
+            text = text,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+        )
+    }
 }

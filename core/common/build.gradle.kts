@@ -24,16 +24,10 @@ android {
 }
 
 dependencies {
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.kotlinx.coroutines.test)
     implementation(libs.kotlinx.serialization.json)
     implementation(project(":core:model"))
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

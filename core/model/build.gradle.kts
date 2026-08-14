@@ -26,10 +26,4 @@ android {
 dependencies {
     implementation(libs.kotlinx.serialization.json)
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Real Accessibility Service for device-agent observation and actions.
@@ -20,6 +21,11 @@ class AccessibilityAgentService : AccessibilityService() {
         private var currentInstance: AccessibilityAgentService? = null
         /** Static accessor for backend discovery and health checks. */
         fun current(): AccessibilityAgentService? = currentInstance
+
+        private const val MAX_TREE_DEPTH = 64
+        private const val MAX_TREE_NODES = 5_000
+        private const val MAX_NODE_TEXT_CHARS = 4_096
+        private const val MAX_RESOURCE_ID_CHARS = 1_024
     }
 
     override fun onCreate() {
@@ -35,6 +41,7 @@ class AccessibilityAgentService : AccessibilityService() {
     /** Latest observed tree snapshot, updated on accessibility events (versioned). */
     @Volatile
     private var latestSnapshot: Snapshot = Snapshot(0L, null)
+    private val snapshotSequence = AtomicLong(0L)
 
     /** Versioned snapshot so callers can detect stale state after actions. */
     data class Snapshot(val version: Long, val root: UiNode?)
@@ -42,24 +49,45 @@ class AccessibilityAgentService : AccessibilityService() {
     fun currentTreeRoot(): AccessibilityNodeInfo? = rootInActiveWindow
     fun latestSnapshot(): Snapshot = latestSnapshot
 
-    /** Convert the live window tree into an internal node model (versioned). */
+    /** Convert the live window tree into a bounded, detached internal node model. */
     fun captureTree(): Snapshot {
-        val root = rootInActiveWindow?.let { parseNode(it) }
-        val next = Snapshot(System.currentTimeMillis(), root)
+        val budget = ParseBudget(MAX_TREE_NODES)
+        val root = rootInActiveWindow?.let { parseNode(it, depth = 0, budget = budget) }
+        val next = Snapshot(snapshotSequence.incrementAndGet(), root)
         latestSnapshot = next
         return next
     }
 
-    private fun parseNode(node: AccessibilityNodeInfo): UiNode {
+    private class ParseBudget(var remaining: Int)
+
+    private fun parseNode(node: AccessibilityNodeInfo, depth: Int, budget: ParseBudget): UiNode? {
+        if (budget.remaining <= 0) return null
+        budget.remaining -= 1
+
         val rect = Rect()
         node.getBoundsInScreen(rect)
-        val children = (0 until node.childCount).map { parseNode(node.getChild(it)!!) }
+        val children = if (depth >= MAX_TREE_DEPTH) {
+            emptyList()
+        } else {
+            buildList {
+                for (index in 0 until node.childCount) {
+                    if (budget.remaining <= 0) break
+                    val child = node.getChild(index) ?: continue
+                    try {
+                        parseNode(child, depth + 1, budget)?.let(::add)
+                    } finally {
+                        @Suppress("DEPRECATION")
+                        child.recycle()
+                    }
+                }
+            }
+        }
         return UiNode(
             packageName = node.packageName?.toString() ?: "",
             className = node.className?.toString() ?: "",
-            text = node.text?.toString() ?: "",
-            contentDescription = node.contentDescription?.toString() ?: "",
-            resourceId = node.viewIdResourceName ?: "",
+            text = node.text?.toString()?.take(MAX_NODE_TEXT_CHARS) ?: "",
+            contentDescription = node.contentDescription?.toString()?.take(MAX_NODE_TEXT_CHARS) ?: "",
+            resourceId = node.viewIdResourceName?.take(MAX_RESOURCE_ID_CHARS) ?: "",
             bounds = UiBounds(rect.left, rect.top, rect.right, rect.bottom),
             clickable = node.isClickable,
             editable = node.isEditable,
@@ -148,12 +176,10 @@ class AccessibilityAgentService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event?.source?.recycle()
-        // Keep a fresh snapshot available so actions can observe state right
-        // before and after an operation (verification loop input).
-        if (rootInActiveWindow != null) {
-            runCatching { latestSnapshot = Snapshot(System.currentTimeMillis(), parseNode(rootInActiveWindow!!)) }
-        }
+        if (event == null) return
+        // Keep a fresh bounded snapshot available so actions can observe state
+        // before and after an operation without recursively walking unbounded UI trees.
+        runCatching { captureTree() }
     }
 
     override fun onInterrupt() {}

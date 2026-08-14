@@ -7,6 +7,7 @@ import com.mtzallqmy.aiagent.model.ApprovalOption
 import com.mtzallqmy.aiagent.model.ApprovalPolicy
 import com.mtzallqmy.aiagent.model.GenerationEvent
 import com.mtzallqmy.aiagent.model.GenerationRequest
+import com.mtzallqmy.aiagent.model.MessageRole
 import com.mtzallqmy.aiagent.model.RiskLevel
 import com.mtzallqmy.aiagent.model.ToolDescriptor
 import com.mtzallqmy.aiagent.providers.AiProvider
@@ -34,8 +35,9 @@ class AgentRuntimeApprovalTest {
     fun `one agent tool call produces one approval request and one execution`() = runBlocking {
         val approvalEngine = ApprovalEngine { ApprovalPolicy.ASK_EVERY_TIME }
         val tool = CountingTool()
+        val provider = SingleToolCallProvider(tool.descriptor.id)
         val runtime = AgentRuntime(
-            provider = SingleToolCallProvider(tool.descriptor.id),
+            provider = provider,
             toolRuntime = ToolRuntime(CapabilityRegistry(), approvalEngine),
         )
 
@@ -50,6 +52,16 @@ class AgentRuntimeApprovalTest {
         assertEquals(1, tool.executionCount)
         assertNull(approvalEngine.requests.tryReceive().getOrNull())
         assertTrue(runtime.run.value?.approvals == 1)
+
+        val followUp = provider.requests.getOrNull(1) ?: error("Provider follow-up request was not captured")
+        val assistantToolCall = followUp.messages.firstOrNull {
+            it.role == MessageRole.ASSISTANT && it.toolCalls.any { call -> call.id == "call-1" }
+        }
+        val toolResult = followUp.messages.firstOrNull {
+            it.role == MessageRole.TOOL && it.toolCallId == "call-1" && it.toolName == tool.descriptor.id
+        }
+        assertTrue("Assistant tool-call context must survive into the next provider turn", assistantToolCall != null)
+        assertTrue("Tool result must be correlated with the original provider call id", toolResult != null)
     }
 
     @Test
@@ -78,12 +90,14 @@ class AgentRuntimeApprovalTest {
 
     private class SingleToolCallProvider(private val toolId: String) : AiProvider {
         private val generationCount = AtomicInteger(0)
+        val requests = java.util.Collections.synchronizedList(mutableListOf<GenerationRequest>())
         override val providerId = "test"
         override val name = "Test"
         override suspend fun listModels(): Result<List<AiModel>> = Result.success(emptyList())
         override suspend fun testConnection(): Result<Unit> = Result.success(Unit)
 
         override fun generate(request: GenerationRequest): Flow<GenerationEvent> = flow {
+            requests += request
             if (generationCount.getAndIncrement() == 0) {
                 emit(GenerationEvent.ToolCallStarted("call-1", toolId))
                 emit(GenerationEvent.ToolCallArgumentsDelta("call-1", "{}"))

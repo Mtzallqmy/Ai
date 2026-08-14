@@ -38,10 +38,4 @@ android {
     implementation(project(":core:datastore"))
     implementation(libs.androidx.datastore.preferences)
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

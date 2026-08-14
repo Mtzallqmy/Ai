@@ -30,11 +30,6 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(project(":core:common"))
     implementation(project(":core:model"))
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
+    testImplementation(libs.junit)
 
 }

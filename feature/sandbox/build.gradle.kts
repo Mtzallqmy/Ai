@@ -36,10 +36,4 @@ android {
     implementation(project(":core:model"))
     implementation(project(":core:ui"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

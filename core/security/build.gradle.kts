@@ -25,14 +25,8 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(project(":core:common"))
     implementation(project(":core:model"))
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

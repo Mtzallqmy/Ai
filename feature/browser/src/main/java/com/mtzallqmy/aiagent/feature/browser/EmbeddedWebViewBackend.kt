@@ -12,7 +12,10 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonElement
 import java.util.UUID
 
-/** Local WebView backend with explicit tab ownership and bounded operations. */
+/**
+ * Local WebView backend with explicit tab ownership and bounded operations.
+ * All webpage content and DOM-derived state are untrusted and sanitized before exposure.
+ */
 class EmbeddedWebViewBackend(
     private val engineFactory: () -> WebViewEngine? = { null },
     private val timeoutMs: Long = 30_000L,
@@ -42,7 +45,8 @@ class EmbeddedWebViewBackend(
     override suspend fun isAvailable(): Boolean = runCatching { engineFactory() != null }.getOrDefault(false)
 
     override suspend fun open(url: String): BrowserTab? {
-        val engine = engineFactory() ?: return null
+        if (!BrowserSecurityPolicy.isAllowedUrl(url)) return null
+        val engine = runCatching { engineFactory() }.getOrNull() ?: return null
         return try {
             withTimeout(timeoutMs) {
                 engine.create()
@@ -81,18 +85,16 @@ class EmbeddedWebViewBackend(
         }
     }
 
-    override suspend fun navigate(url: String): Boolean = withEngine { it.navigate(url).isSuccess }
+    override suspend fun navigate(url: String): Boolean {
+        if (!BrowserSecurityPolicy.isAllowedUrl(url)) return false
+        return withEngine { it.navigate(url).isSuccess }
+    }
 
     override suspend fun currentState(): BrowserState {
         val (tabId, engine) = activeEngine() ?: return EMPTY_STATE
         return try {
             withTimeout(timeoutMs) {
-                BrowserState(
-                    tabId = tabId,
-                    url = engine.currentUrl(),
-                    title = engine.title(),
-                    accessibleTree = engine.snapshot(),
-                )
+                snapshotState(tabId, engine)
             }
         } catch (_: TimeoutCancellationException) {
             EMPTY_STATE
@@ -103,25 +105,42 @@ class EmbeddedWebViewBackend(
         }
     }
 
-    override suspend fun find(query: String): Int = withEngineValue(0) { it.findOnPage(query) }
-
-    override suspend fun click(selector: String): Boolean = action { it.clickSelector(selector) }
-
-    override suspend fun type(selector: String, text: String): Boolean = action {
-        it.typeIntoSelector(selector, text)
+    override suspend fun find(query: String): Int {
+        if (!BrowserSecurityPolicy.isSafeText(query)) return 0
+        return withEngineValue(0) { it.findOnPage(query) }
     }
 
-    override suspend fun submitForm(selector: String?): Boolean = action { it.submitForm(selector) }
+    override suspend fun click(selector: String): Boolean {
+        if (!BrowserSecurityPolicy.isSafeSelector(selector)) return false
+        return action { it.clickSelector(selector) }
+    }
+
+    override suspend fun type(selector: String, text: String): Boolean {
+        if (!BrowserSecurityPolicy.isSafeSelector(selector) || !BrowserSecurityPolicy.isSafeText(text)) return false
+        return action { it.typeIntoSelector(selector, text) }
+    }
+
+    override suspend fun submitForm(selector: String?): Boolean {
+        if (selector != null && !BrowserSecurityPolicy.isSafeSelector(selector)) return false
+        return action { it.submitForm(selector) }
+    }
 
     override suspend fun scroll(deltaY: Int): Boolean = action { it.scrollBy(deltaY) }
 
-    override suspend fun evaluate(script: String): JsonElement? = withEngineValue(null) { it.evaluate(script) }
+    override suspend fun evaluate(script: String): JsonElement? {
+        if (!BrowserSecurityPolicy.isSafeText(script)) return null
+        return withEngineValue(null) { it.evaluate(script) }
+    }
 
-    override suspend fun upload(selector: String, files: List<Uri>): Boolean =
-        withEngine { it.upload(selector, files) }
+    override suspend fun upload(selector: String, files: List<Uri>): Boolean {
+        if (!BrowserSecurityPolicy.isSafeSelector(selector)) return false
+        return withEngine { it.upload(selector, files) }
+    }
 
-    override suspend fun download(selector: String): BrowserArtifact? =
-        withEngineValue(null) { it.download(selector) }
+    override suspend fun download(selector: String): BrowserArtifact? {
+        if (!BrowserSecurityPolicy.isSafeSelector(selector)) return null
+        return withEngineValue(null) { it.download(selector) }
+    }
 
     override suspend fun cookies(): List<BrowserCookie> = withEngineValue(emptyList()) { it.cookies() }
 
@@ -141,11 +160,25 @@ class EmbeddedWebViewBackend(
             true
         } catch (_: TimeoutCancellationException) {
             false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            false
         }
     }
 
     override suspend fun verify(expected: BrowserExpectation): BrowserVerification =
         verifyState(currentState(), expected)
+
+    private suspend fun snapshotState(tabId: String, engine: WebViewEngine): BrowserState {
+        val sanitized = BrowserSnapshotSanitizer.sanitize(engine.snapshot())
+        return BrowserState(
+            tabId = tabId,
+            url = engine.currentUrl(),
+            title = engine.title(),
+            accessibleTree = sanitized,
+        )
+    }
 
     private suspend fun action(block: suspend (WebViewEngine) -> Boolean): Boolean = withEngine { engine ->
         val succeeded = block(engine)

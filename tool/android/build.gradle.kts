@@ -32,10 +32,6 @@ dependencies {
     implementation(project(":core:tools"))
     implementation(project(":core:agent"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
