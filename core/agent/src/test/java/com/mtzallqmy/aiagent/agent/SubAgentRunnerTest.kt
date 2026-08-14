@@ -46,10 +46,24 @@ class SubAgentRunnerTest {
             "Perform a delegated task",
         ).await()
 
-        assertEquals(SubAgentStatus.COMPLETED, result.status)
-        assertEquals(0, fixture.executions.get())
-        assertTrue(result.memoryNamespace.startsWith("subagent:parent-run:browser-1:"))
-        assertTrue(result.memoryPersisted)
+        assertEquals(
+            "status=${result.status}, output=${result.output}, errors=${result.errors}, toolCalls=${result.toolCalls}",
+            SubAgentStatus.COMPLETED,
+            result.status,
+        )
+        assertEquals(
+            "status=${result.status}, output=${result.output}, errors=${result.errors}, toolCalls=${result.toolCalls}",
+            0,
+            fixture.executions.get(),
+        )
+        assertTrue(
+            "unexpected memory namespace: ${result.memoryNamespace}",
+            result.memoryNamespace.startsWith("subagent:parent-run:browser-1:"),
+        )
+        assertTrue(
+            "memory was not persisted: output='${result.output}', status=${result.status}",
+            result.memoryPersisted,
+        )
         fixture.close()
     }
 

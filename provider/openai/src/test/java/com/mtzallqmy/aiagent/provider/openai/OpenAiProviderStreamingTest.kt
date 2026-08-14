@@ -5,11 +5,13 @@ import com.mtzallqmy.aiagent.model.GenerationEvent
 import com.mtzallqmy.aiagent.model.GenerationRequest
 import com.mtzallqmy.aiagent.model.MessageRole
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -34,6 +36,7 @@ class OpenAiProviderStreamingTest {
     fun `stream completes and keeps tool id across argument chunks`() = runTest {
         server.enqueue(
             MockResponse()
+                .setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
                 .setHeader("Content-Type", "text/event-stream")
                 .setBody(
                     """
@@ -60,7 +63,10 @@ class OpenAiProviderStreamingTest {
                     messages = listOf(ChatMessage(role = MessageRole.USER, content = "call echo")),
                     modelId = "test-model",
                 ),
-            ).toList()
+            ).transformWhile { event ->
+                emit(event)
+                event !is GenerationEvent.GenerationCompleted
+            }.toList()
         }
 
         val started = events.filterIsInstance<GenerationEvent.ToolCallStarted>()

@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class SubAgentRole { BROWSER, CODING, RESEARCH, DEVICE }
 
@@ -248,12 +249,21 @@ class SubAgentRunner(
         val startedAt = System.currentTimeMillis()
         val output = StringBuffer()
         val finalOutput = AtomicReference<String?>(null)
+        val finalOutputReady = CompletableDeferred<Unit>()
         val collector = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             runtime.events.collect { event ->
                 when (event) {
                     is GenerationEvent.TextDelta -> output.append(event.text)
-                    is GenerationEvent.GenerationCompleted -> finalOutput.set(event.finalText)
-                    is GenerationEvent.GenerationFailed -> finalOutput.compareAndSet(null, output.toString())
+                    is GenerationEvent.GenerationCompleted -> {
+                        if (event.finalText.isNotBlank()) {
+                            finalOutput.set(event.finalText)
+                            finalOutputReady.complete(Unit)
+                        }
+                    }
+                    is GenerationEvent.GenerationFailed -> {
+                        finalOutput.compareAndSet(null, output.toString())
+                        finalOutputReady.complete(Unit)
+                    }
                     else -> Unit
                 }
             }
@@ -271,6 +281,7 @@ class SubAgentRunner(
             )
             started.complete(Unit)
             val terminalState = runtime.state.filter(::isTerminal).first()
+            withTimeoutOrNull(FINAL_OUTPUT_TIMEOUT_MS) { finalOutputReady.await() }
             val record = requireNotNull(runtime.run.value)
             val resolvedOutput = finalOutput.get() ?: output.toString()
             buildResult(
@@ -403,5 +414,6 @@ class SubAgentRunner(
 
     private companion object {
         const val MEMORY_CONTEXT_LIMIT = 8
+        const val FINAL_OUTPUT_TIMEOUT_MS = 1_000L
     }
 }
