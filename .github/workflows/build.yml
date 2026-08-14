@@ -114,6 +114,14 @@ jobs:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Upload release gate outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
 
   android-emulator:
     name: Android x86_64 instrumentation
@@ -146,3 +154,12 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: ./gradlew --stacktrace connectedDebugAndroidTest
+      - name: Upload Android instrumentation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-instrumentation-results
+          path: |
+            **/build/reports/androidTests/**
+            **/build/outputs/androidTest-results/**
+          if-no-files-found: warn
