@@ -33,8 +33,18 @@ class OpenAiProvider(
     private val apiKeyProvider: suspend () -> String?,
     private val baseUrl: String = DEFAULT_BASE_URL,
     private val defaultModel: String = "gpt-4o-mini",
-    private val client: OkHttpClient = SafeHttpClient.create(),
 ) : AiProvider {
+    private var client: OkHttpClient = SafeHttpClient.create()
+
+    internal constructor(
+        apiKeyProvider: suspend () -> String?,
+        baseUrl: String = DEFAULT_BASE_URL,
+        defaultModel: String = "gpt-4o-mini",
+        client: OkHttpClient,
+    ) : this(apiKeyProvider, baseUrl, defaultModel) {
+        this.client = client
+    }
+
     override val providerId = "openai"
     override val name = "OpenAI"
 
