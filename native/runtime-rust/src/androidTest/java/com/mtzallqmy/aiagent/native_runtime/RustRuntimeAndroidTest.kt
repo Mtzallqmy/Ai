@@ -185,6 +185,25 @@ class RustRuntimeAndroidTest {
         }
     }
 
+    @Test
+    fun explicitCloseRequiresReconnectAndReconnectRestoresExecution() = runBlocking {
+        client.close()
+        val disconnected = runCatching { client.capabilities() }
+        assertTrue(disconnected.isFailure)
+
+        client.connect()
+        val result = execute(
+            RustExecutionRequest(
+                program = "/system/bin/sh",
+                arguments = listOf("-c", "printf reconnected"),
+            ),
+        )
+
+        assertEquals("completed", result.status)
+        assertEquals(0, result.exitCode)
+        assertEquals("reconnected", result.stdout)
+    }
+
     private fun execute(request: RustExecutionRequest): RustExecutionResult {
         val start = client.start(request)
         val executionId = requireExecutionId(start)
