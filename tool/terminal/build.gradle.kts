@@ -25,7 +25,7 @@ android {
 }
 
 dependencies {
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(project(":core:capabilities"))
@@ -33,11 +33,5 @@ dependencies {
     implementation(project(":core:tools"))
     implementation(project(":core:agent"))
     implementation(libs.squareup.okhttp)
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

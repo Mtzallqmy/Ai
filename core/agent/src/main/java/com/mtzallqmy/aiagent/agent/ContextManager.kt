@@ -4,42 +4,70 @@ import com.mtzallqmy.aiagent.model.ChatMessage
 import com.mtzallqmy.aiagent.model.MessageRole
 
 /**
- * Context manager: token budgeting, message truncation, duplicate suppression,
- * tool-output compression. Never sends full UI trees or terminal logs to the model.
+ * Context manager: bounded history selection and tool-output compression.
+ *
+ * It deliberately removes complete user turns instead of individual messages so
+ * an assistant tool invocation is never detached from its following TOOL result.
+ * Token counting is approximate; provider usage events remain the source of truth
+ * for accounting and run-level budgets.
  */
 class ContextManager(
     private val contextWindow: Int = 4096,
     private val reserveForResponse: Int = 2048,
     private val maxToolOutputChars: Int = 3_000,
 ) {
-    private val seenHashes = mutableSetOf<Int>()
+    init {
+        require(contextWindow > 0) { "contextWindow must be positive" }
+        require(reserveForResponse >= 0) { "reserveForResponse must not be negative" }
+        require(maxToolOutputChars > 0) { "maxToolOutputChars must be positive" }
+    }
 
     /**
-     * Fits the message history into the remaining budget.
-     * 1) Dedup adjacent identical tool messages.
-     * 2) Truncate oldest non-system messages first.
-     * 3) Compress long tool outputs.
+     * Fits message history into a conservative estimated token budget.
+     * System messages are retained and old *complete user turns* are dropped first.
      */
-    fun fit(messages: List<ChatMessage>, estimatedTokens: Int): List<ChatMessage> {
-        val budget = (contextWindow - reserveForResponse - estimatedTokens).coerceAtLeast(0)
-        val deduped = messages.fold(mutableListOf<ChatMessage>()) { acc, msg ->
-            val hash = msg.content.hashCode() + msg.role.hashCode()
-            if (acc.isNotEmpty() && acc.last().role == MessageRole.TOOL && seenHashes.contains(hash) && msg.role == MessageRole.TOOL) acc
-            else {
-                if (msg.role == MessageRole.TOOL) seenHashes.add(hash)
-                acc.add(msg); acc
+    fun fit(messages: List<ChatMessage>, estimatedTokens: Int = 0): List<ChatMessage> {
+        if (messages.isEmpty()) return emptyList()
+
+        val normalized = messages
+            .map { message ->
+                if (message.role == MessageRole.TOOL) {
+                    message.copy(content = compressToolOutput(message.content))
+                } else message
             }
+            .fold(mutableListOf<ChatMessage>()) { acc, message ->
+                val previous = acc.lastOrNull()
+                if (
+                    message.role == MessageRole.TOOL &&
+                    previous?.role == MessageRole.TOOL &&
+                    previous.content == message.content &&
+                    previous.toolCallId == message.toolCallId
+                ) {
+                    acc
+                } else {
+                    acc += message
+                    acc
+                }
+            }
+
+        val systemMessages = normalized.filter { it.role == MessageRole.SYSTEM }
+        val nonSystem = normalized.filterNot { it.role == MessageRole.SYSTEM }
+        val turns = splitIntoTurns(nonSystem).toMutableList()
+
+        val available = (contextWindow - reserveForResponse - estimatedTokens).coerceAtLeast(MIN_CONTEXT_TOKENS)
+        fun totalTokens(): Int = systemMessages.sumOf(::estimateMessageTokens) +
+            turns.sumOf { turn -> turn.sumOf(::estimateMessageTokens) }
+
+        // Preserve at least the newest turn; remove whole historical turns to keep
+        // user/assistant/tool correlation structurally valid for provider APIs.
+        while (turns.size > 1 && totalTokens() > available) {
+            turns.removeAt(0)
         }
-        var remaining = deduped.toMutableList()
-        var tokens = remaining.sumOf { estimateTokens(it.content) }
-        while (tokens > budget && remaining.count { it.role != MessageRole.SYSTEM } > 1) {
-            // remove oldest non-system message
-            val idx = remaining.indexOfFirst { it.role != MessageRole.SYSTEM }
-            if (idx < 0) break
-            tokens -= estimateTokens(remaining[idx].content)
-            remaining.removeAt(idx)
+
+        return buildList {
+            addAll(systemMessages)
+            turns.forEach { addAll(it) }
         }
-        return remaining
     }
 
     fun compressToolOutput(output: String): String =
@@ -47,8 +75,31 @@ class ContextManager(
             output.take(maxToolOutputChars) + "\n... [output truncated]"
         } else output
 
-    /** Approximate tokens ≈ characters / 4 for CJK+Latin mix — real usage comes from provider usage events. */
+    /** Approximate tokens ≈ characters / 4. Provider usage is used for actual accounting. */
     internal fun estimateTokens(text: String): Int = (text.length + 3) / 4
 
-    fun reset() { seenHashes.clear() }
+    private fun estimateMessageTokens(message: ChatMessage): Int {
+        val toolMetadata = message.toolCalls.sumOf { call ->
+            estimateTokens(call.name) + estimateTokens(call.arguments)
+        }
+        return estimateTokens(message.content) + toolMetadata + MESSAGE_OVERHEAD_TOKENS
+    }
+
+    private fun splitIntoTurns(messages: List<ChatMessage>): List<List<ChatMessage>> {
+        if (messages.isEmpty()) return emptyList()
+        val turns = mutableListOf<MutableList<ChatMessage>>()
+        messages.forEach { message ->
+            if (message.role == MessageRole.USER || turns.isEmpty()) {
+                turns.add(mutableListOf(message))
+            } else {
+                turns.last().add(message)
+            }
+        }
+        return turns
+    }
+
+    companion object {
+        private const val MIN_CONTEXT_TOKENS = 512
+        private const val MESSAGE_OVERHEAD_TOKENS = 8
+    }
 }

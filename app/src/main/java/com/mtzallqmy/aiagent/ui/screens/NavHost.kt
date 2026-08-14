@@ -67,6 +67,7 @@ fun AegisNavHost() {
             0 -> ChatScreen(
                 runtime = runtime,
                 providers = providerRegistry,
+                settings = settings,
                 tools = tools,
                 modifier = Modifier.padding(padding),
             )
@@ -83,7 +84,6 @@ fun AegisNavHost() {
             3 -> SecurityCenterScreen(modifier = Modifier.padding(padding))
             4 -> SettingsScreen(
                 settings = settings,
-                vault = vault,
                 modifier = Modifier.padding(padding),
             )
             5 -> LogsScreen(modifier = Modifier.padding(padding))

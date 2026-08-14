@@ -8,8 +8,11 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -21,8 +24,8 @@ import java.io.IOException
  */
 class AnthropicProvider(
     private val apiKeyProvider: suspend () -> String?,
-    private val apiVersion: String = "2025-06-01",
-    private val defaultModel: String = "claude-opus-4-7",
+    private val apiVersion: String = "2023-06-01",
+    private val defaultModel: String = "claude-opus-4-8",
 ) : AiProvider {
 
     override val providerId: String = "anthropic"
@@ -35,13 +38,13 @@ class AnthropicProvider(
         try {
             val key = apiKeyProvider() ?: throw ProviderError.AuthenticationError("No Anthropic API key")
             val request = Request.Builder()
-                .url("https://api.anthropic.com/v1/models")
+                .url("https://api.anthropic.com/v1/models?limit=1000")
                 .header("x-api-key", key)
                 .header("anthropic-version", apiVersion)
                 .build()
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) throw mapHttpError(resp.code)
-                val models = json.decodeFromString<List<AnthropicModelEntry>>(resp.body?.string() ?: "[]").map { m ->
+                val models = json.decodeFromString<AnthropicModelList>(resp.body?.string() ?: "{}").data.map { m ->
                     AiModel(
                         id = m.id,
                         name = m.displayName ?: m.id,
@@ -52,7 +55,7 @@ class AnthropicProvider(
                             toolCalling = true,
                             reasoning = m.id.contains("opus", ignoreCase = true) || m.id.contains("sonnet", ignoreCase = true),
                             contextWindow = m.maxInputTokens ?: 200_000,
-                            maxOutputTokens = m.maxOutputTokens ?: 16_000,
+                            maxOutputTokens = m.maxTokens ?: 16_000,
                         ),
                         routing = ModelRoutingMetadata(
                             speedTier = when {
@@ -96,9 +99,10 @@ class AnthropicProvider(
 
     override fun generate(request: GenerationRequest): Flow<GenerationEvent> = callbackFlow {
         val key = apiKeyProvider()
-        if (key == null) {
+        if (key.isNullOrBlank()) {
             trySend(GenerationEvent.GenerationFailed(ProviderError.AuthenticationError("No Anthropic API key")))
-            close(); return@callbackFlow
+            close()
+            return@callbackFlow
         }
         val payload = buildPayload(request)
         val req = Request.Builder()
@@ -108,80 +112,152 @@ class AnthropicProvider(
             .header("Content-Type", "application/json")
             .post(payload.toRequestBody("application/json".toMediaType()))
             .build()
-        val response = try {
-            client.newCall(req).execute()
-        } catch (e: IOException) {
-            trySend(GenerationEvent.GenerationFailed(ProviderError.NetworkError(e.message ?: "Network failure")))
-            close(); return@callbackFlow
-        }
-        if (!response.isSuccessful) {
-            trySend(GenerationEvent.GenerationFailed(mapHttpError(response.code)))
-            response.close(); close(); return@callbackFlow
-        }
-        try {
-            response.body?.source()?.let { source ->
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") break
-                    val event = try {
-                        json.decodeFromString<AnthropicStreamEvent>(data)
-                    } catch (e: Exception) {
-                        continue
+        val call = client.newCall(req)
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (!call.isCanceled()) trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                close()
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        trySend(GenerationEvent.GenerationFailed(mapHttpError(resp.code)))
+                        close()
+                        return
                     }
-                    when (event.type) {
-                        "content_block_start" -> {
-                            val block = event.contentBlock
-                            when (block?.type) {
-                                "text" -> block.text?.takeIf { it.isNotEmpty() }?.let {
-                                    trySend(GenerationEvent.TextDelta(it))
+                    var terminalSent = false
+                    val toolIdsByIndex = mutableMapOf<Int, String>()
+                    var inputTokensReported = 0
+                    var outputTokensReported = 0
+                    fun emitUsage(inputTotal: Int?, outputTotal: Int?) {
+                        val input = inputTotal ?: inputTokensReported
+                        val output = outputTotal ?: outputTokensReported
+                        val inputDelta = (input - inputTokensReported).coerceAtLeast(0)
+                        val outputDelta = (output - outputTokensReported).coerceAtLeast(0)
+                        if (inputDelta > 0 || outputDelta > 0) {
+                            trySend(GenerationEvent.Usage(inputDelta, outputDelta))
+                        }
+                        inputTokensReported = maxOf(inputTokensReported, input)
+                        outputTokensReported = maxOf(outputTokensReported, output)
+                    }
+                    fun completeOnce() {
+                        if (!terminalSent) {
+                            terminalSent = true
+                            trySend(GenerationEvent.GenerationCompleted(""))
+                        }
+                    }
+                    try {
+                        resp.body?.source()?.let { source ->
+                            while (!source.exhausted() && !call.isCanceled()) {
+                                val line = source.readUtf8Line() ?: break
+                                if (!line.startsWith("data:")) continue
+                                val data = line.removePrefix("data:").trim()
+                                if (data == "[DONE]") {
+                                    completeOnce()
+                                    break
                                 }
-                                "tool_use" -> trySend(GenerationEvent.ToolCallStarted(block.id ?: "", block.name ?: ""))
-                                else -> {}
+                                val event = runCatching { json.decodeFromString<AnthropicStreamEvent>(data) }
+                                    .getOrNull() ?: continue
+                                when (event.type) {
+                                    "message_start" -> event.message?.usage?.let { usage ->
+                                        emitUsage(usage.inputTokens, usage.outputTokens)
+                                    }
+                                    "content_block_start" -> when (event.contentBlock?.type) {
+                                        "text" -> event.contentBlock.text?.takeIf { it.isNotEmpty() }?.let {
+                                            trySend(GenerationEvent.TextDelta(it))
+                                        }
+                                        "tool_use" -> {
+                                            val id = event.contentBlock.id.orEmpty().ifBlank { "anthropic-tool-${event.index}" }
+                                            toolIdsByIndex[event.index] = id
+                                            val name = event.contentBlock.name.orEmpty()
+                                            if (name.isNotBlank()) {
+                                                trySend(GenerationEvent.ToolCallStarted(id, name))
+                                            }
+                                        }
+                                        else -> Unit
+                                    }
+                                    "content_block_delta" -> {
+                                        event.delta?.text?.takeIf { it.isNotEmpty() }?.let {
+                                            trySend(GenerationEvent.TextDelta(it))
+                                        }
+                                        event.delta?.partialJson?.takeIf { it.isNotEmpty() }?.let { fragment ->
+                                            val id = toolIdsByIndex[event.index] ?: "anthropic-tool-${event.index}"
+                                            trySend(GenerationEvent.ToolCallArgumentsDelta(id, fragment))
+                                        }
+                                    }
+                                    "message_delta" -> {
+                                        event.usage?.let { usage ->
+                                            emitUsage(usage.inputTokens, usage.outputTokens)
+                                        }
+                                        if (event.delta?.stopReason != null) completeOnce()
+                                    }
+                                    "message_stop" -> completeOnce()
+                                    "error" -> {
+                                        terminalSent = true
+                                        trySend(
+                                            GenerationEvent.GenerationFailed(
+                                                ProviderError.ProviderError_(
+                                                    event.error?.code?.toIntOrNull() ?: 500,
+                                                    event.error?.message ?: "Anthropic error",
+                                                ),
+                                            ),
+                                        )
+                                        break
+                                    }
+                                }
                             }
                         }
-                        "content_block_delta" -> {
-                            val delta = event.delta
-                            delta?.text?.takeIf { it.isNotEmpty() }?.let { trySend(GenerationEvent.TextDelta(it)) }
-                            delta?.partialJson?.takeIf { it.isNotEmpty() }?.let {
-                                trySend(GenerationEvent.ToolCallArgumentsDelta(event.index.toString(), it))
-                            }
-                        }
-                        "message_delta" -> {
-                            if (event.delta?.stopReason != null) trySend(GenerationEvent.GenerationCompleted(""))
-                            event.usage?.let { u ->
-                                trySend(GenerationEvent.Usage(u.inputTokens ?: 0, u.outputTokens ?: 0))
-                            }
-                        }
-                        "error" -> {
-                            trySend(GenerationEvent.GenerationFailed(
-                                ProviderError.ProviderError_(event.error?.code?.toIntOrNull() ?: 500, event.error?.message ?: "Anthropic error"),
-                            ))
-                        }
-                        else -> {}
+                        if (!call.isCanceled() && !terminalSent) completeOnce()
+                    } catch (error: Exception) {
+                        if (!call.isCanceled()) trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                    } finally {
+                        close()
                     }
                 }
             }
-        } catch (e: Exception) {
-            trySend(GenerationEvent.GenerationFailed(mapError(e)))
-        } finally {
-            response.close()
-        }
-        awaitClose { response.close() }
+        })
+        awaitClose { call.cancel() }
     }
 
     private fun buildPayload(request: GenerationRequest): String {
         val system = request.messages.firstOrNull { it.role == MessageRole.SYSTEM }?.content
         val chatMessages = request.messages.filter { it.role != MessageRole.SYSTEM }
         val sb = StringBuilder()
-        sb.append("{\"model\":\"").append(request.modelId.ifEmpty { defaultModel }).append("\",\"max_tokens\":").append(request.maxTokens ?: 4096).append(",\"stream\":true")
+        sb.append("{\"model\":").append(jsonString(request.modelId.ifEmpty { defaultModel })).append(",\"max_tokens\":").append(request.maxTokens ?: 4096).append(",\"stream\":true")
         system?.let { sb.append(",\"system\":").append(jsonString(it)) }
         sb.append(",\"messages\":")
         sb.append("[")
         chatMessages.forEachIndexed { idx, m ->
             if (idx > 0) sb.append(",")
-            sb.append("{\"role\":\"").append(m.role.name.lowercase()).append("\",\"content\":").append(jsonString(m.content)).append("}")
+            val toolCallId = m.toolCallId
+            when {
+                m.role == MessageRole.TOOL && !toolCallId.isNullOrBlank() -> {
+                    sb.append("{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":")
+                        .append(jsonString(toolCallId))
+                        .append(",\"content\":").append(jsonString(m.content)).append("}]}")
+                }
+                m.role == MessageRole.ASSISTANT && m.toolCalls.isNotEmpty() -> {
+                    sb.append("{\"role\":\"assistant\",\"content\":[")
+                    var contentIndex = 0
+                    if (m.content.isNotBlank()) {
+                        sb.append("{\"type\":\"text\",\"text\":").append(jsonString(m.content)).append("}")
+                        contentIndex++
+                    }
+                    m.toolCalls.forEach { call ->
+                        if (contentIndex++ > 0) sb.append(",")
+                        sb.append("{\"type\":\"tool_use\",\"id\":").append(jsonString(call.id))
+                            .append(",\"name\":").append(jsonString(call.name))
+                            .append(",\"input\":").append(safeArguments(call.arguments)).append("}")
+                    }
+                    sb.append("]}")
+                }
+                else -> {
+                    val role = if (m.role == MessageRole.TOOL) "user" else m.role.name.lowercase()
+                    sb.append("{\"role\":").append(jsonString(role))
+                        .append(",\"content\":").append(jsonString(m.content)).append("}")
+                }
+            }
         }
         sb.append("]")
         if (request.tools.isNotEmpty()) {
@@ -189,8 +265,8 @@ class AnthropicProvider(
             sb.append("[")
             request.tools.forEachIndexed { idx, t ->
                 if (idx > 0) sb.append(",")
-                sb.append("{\"name\":\"").append(t.id).append("\",\"description\":").append(jsonString(t.description)).append(",\"input_schema\":")
-                sb.append(t.inputSchema.ifBlank { "{\"type\":\"object\",\"properties\":{}}" })
+                sb.append("{\"name\":").append(jsonString(t.id)).append(",\"description\":").append(jsonString(t.description)).append(",\"input_schema\":")
+                sb.append(safeSchema(t.inputSchema))
                 sb.append("}")
             }
             sb.append("]")
@@ -198,6 +274,15 @@ class AnthropicProvider(
         sb.append("}")
         return sb.toString()
     }
+
+    private fun safeSchema(raw: String): String = runCatching {
+        json.parseToJsonElement(raw.ifBlank { "{\"type\":\"object\",\"properties\":{}}" }).toString()
+    }.getOrDefault("{\"type\":\"object\",\"properties\":{}}")
+
+    private fun safeArguments(raw: String): String = runCatching {
+        val parsed = json.parseToJsonElement(raw.ifBlank { "{}" })
+        if (parsed is kotlinx.serialization.json.JsonObject) parsed.toString() else "{}"
+    }.getOrDefault("{}")
 
     private fun jsonString(s: String): String = buildString {
         append('"')
@@ -223,21 +308,30 @@ class AnthropicProvider(
 }
 
 @Serializable
+private data class AnthropicModelList(val data: List<AnthropicModelEntry> = emptyList())
+
+@Serializable
 private data class AnthropicModelEntry(
     val id: String,
-    val displayName: String? = null,
-    val maxInputTokens: Int? = null,
-    val maxOutputTokens: Int? = null,
+    @SerialName("display_name") val displayName: String? = null,
+    @SerialName("max_input_tokens") val maxInputTokens: Int? = null,
+    @SerialName("max_tokens") val maxTokens: Int? = null,
 )
 
 @Serializable
 private data class AnthropicStreamEvent(
     val type: String = "",
     val index: Int = 0,
-    val contentBlock: AnthropicBlock? = null,
+    @SerialName("content_block") val contentBlock: AnthropicBlock? = null,
+    val message: AnthropicMessage? = null,
     val delta: AnthropicDelta? = null,
     val usage: AnthropicUsage? = null,
     val error: AnthropicError? = null,
+)
+
+@Serializable
+private data class AnthropicMessage(
+    val usage: AnthropicUsage? = null,
 )
 
 @Serializable
@@ -252,14 +346,14 @@ private data class AnthropicBlock(
 private data class AnthropicDelta(
     val type: String? = null,
     val text: String? = null,
-    val partialJson: String? = null,
-    val stopReason: String? = null,
+    @SerialName("partial_json") val partialJson: String? = null,
+    @SerialName("stop_reason") val stopReason: String? = null,
 )
 
 @Serializable
 private data class AnthropicUsage(
-    val inputTokens: Int? = null,
-    val outputTokens: Int? = null,
+    @SerialName("input_tokens") val inputTokens: Int? = null,
+    @SerialName("output_tokens") val outputTokens: Int? = null,
 )
 
 @Serializable

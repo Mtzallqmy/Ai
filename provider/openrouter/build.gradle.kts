@@ -24,7 +24,7 @@ android {
 }
 
 dependencies {
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.squareup.okhttp)
@@ -32,11 +32,5 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:network"))
     implementation(project(":provider:openai-compatible"))
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

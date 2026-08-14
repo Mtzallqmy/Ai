@@ -1,5 +1,8 @@
 # Hardening TODO — from aegis_ai_agent_full_audit_hardening_prompt_ar.txt
 
+> **ARCHIVED SNAPSHOT:** هذا الملف يوثق مرحلة أقدم من المشروع ولا يمثل الحالة الحالية. استخدم `README.md` و`docs/REPAIR_AND_VERIFICATION_REPORT_AR.md` ونتائج CI الحالية كمصدر للحالة الراهنة.
+
+
 ## Phase 1: Audit + build + CI stabilization
 - [x] Read full prompt (1547 lines)
 - [x] docs/current-audit.md — actual inspection of every subsystem

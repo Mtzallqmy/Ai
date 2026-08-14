@@ -9,7 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
-/** Singleton database built with a fallback-destructive policy only for unrecoverable schema errors. */
+/** Singleton database that requires explicit Room migrations for schema changes. */
 object DatabaseProvider {
     @Volatile
     private var instance: AppDatabase? = null
@@ -20,7 +20,6 @@ object DatabaseProvider {
             AppDatabase::class.java,
             "aegis_agent.db",
         )
-            .fallbackToDestructiveMigration()
             .addCallback(PrepopulateSeed(context))
             .build()
             .also { instance = it }

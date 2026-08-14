@@ -26,7 +26,7 @@ android {
 
 dependencies {
     implementation(libs.androidx.room.runtime)
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
     implementation("org.jetbrains.kotlin:kotlin-test:1.9.24")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
@@ -36,11 +36,5 @@ dependencies {
     implementation(project(":core:network"))
     implementation(libs.squareup.okhttp)
     implementation(libs.kotlinx.serialization.json)
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

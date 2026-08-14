@@ -57,6 +57,11 @@ data class ChatMessage(
     val id: String = java.util.UUID.randomUUID().toString(),
     val role: MessageRole,
     val content: String,
+    /** Provider-neutral tool invocations carried by assistant messages. */
+    val toolCalls: List<ToolCall> = emptyList(),
+    /** Correlates a TOOL result with the provider tool invocation that produced it. */
+    val toolCallId: String? = null,
+    val toolName: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
 )
 

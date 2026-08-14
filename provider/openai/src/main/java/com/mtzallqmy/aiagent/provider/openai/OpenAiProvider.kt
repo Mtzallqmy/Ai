@@ -8,12 +8,22 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.IOException
 
 /**
  * Real OpenAI provider: chat completions with Server-Sent Events streaming
@@ -24,14 +34,24 @@ class OpenAiProvider(
     private val baseUrl: String = DEFAULT_BASE_URL,
     private val defaultModel: String = "gpt-4o-mini",
 ) : AiProvider {
+    private var client: OkHttpClient = SafeHttpClient.create()
+
+    internal constructor(
+        apiKeyProvider: suspend () -> String?,
+        baseUrl: String = DEFAULT_BASE_URL,
+        defaultModel: String = "gpt-4o-mini",
+        client: OkHttpClient,
+    ) : this(apiKeyProvider, baseUrl, defaultModel) {
+        this.client = client
+    }
+
     override val providerId = "openai"
     override val name = "OpenAI"
 
-    private val client = SafeHttpClient.create()
     private val json = Json { ignoreUnknownKeys = true }
     override suspend fun listModels(): Result<List<AiModel>> = withContext(Dispatchers.IO) {
         try {
-            val key = apiKeyProvider() ?: error("No API key")
+            val key = apiKeyProvider() ?: throw ProviderError.AuthenticationError("No OpenAI API key")
             val request = Request.Builder()
                 .url("$baseUrl/models")
                 .header("Authorization", "Bearer $key")
@@ -86,105 +106,147 @@ class OpenAiProvider(
             .header("Content-Type", "application/json")
             .post(payload.toRequestBody("application/json".toMediaType()))
             .build()
-        val response: Response = client.newCall(req).execute()
-        if (!response.isSuccessful) {
-            trySend(GenerationEvent.GenerationFailed(mapHttpError(response.code)))
-            response.close()
-            close()
-            return@callbackFlow
-        }
-        try {
-            response.body?.source()?.let { source ->
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") {
-                        trySend(GenerationEvent.GenerationCompleted(""))
-                        break
+        val call = client.newCall(req)
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (!call.isCanceled()) {
+                    trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                }
+                close()
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        trySend(GenerationEvent.GenerationFailed(mapHttpError(resp.code)))
+                        close()
+                        return
                     }
-                    val chunk = try {
-                        json.decodeFromString<ChatCompletionChunk>(data)
-                    } catch (e: Exception) {
-                        continue
-                    }
-                    if (chunk.usage != null) {
-                        trySend(GenerationEvent.Usage(chunk.usage.promptTokens ?: 0, chunk.usage.completionTokens ?: 0))
-                    }
-                    val choice = chunk.choices.firstOrNull() ?: continue
-                    val delta = choice.delta
-                    delta.content?.let { if (it.isNotEmpty()) trySend(GenerationEvent.TextDelta(it)) }
-                    val tools = delta.toolCalls ?: emptyList()
-                    for (tc in tools) {
-                        val callId = tc.id
-                        val functionName = tc.function?.name
-                        val args = tc.function?.arguments
-                        if (callId != null || functionName != null) {
-                            trySend(GenerationEvent.ToolCallStarted(callId ?: "", functionName ?: ""))
-                        }
-                        if (args != null) {
-                            trySend(GenerationEvent.ToolCallArgumentsDelta(callId ?: "", args))
+                    var terminalSent = false
+                    val toolIdsByIndex = mutableMapOf<Int, String>()
+                    val startedToolIndices = mutableSetOf<Int>()
+                    fun completeOnce() {
+                        if (!terminalSent) {
+                            terminalSent = true
+                            trySend(GenerationEvent.GenerationCompleted(""))
                         }
                     }
-                    if (choice.finishReason != null) {
-                        trySend(GenerationEvent.GenerationCompleted(""))
+                    try {
+                        resp.body?.source()?.let { source ->
+                            while (!source.exhausted() && !call.isCanceled()) {
+                                val line = source.readUtf8Line() ?: break
+                                if (!line.startsWith("data:")) continue
+                                val data = line.removePrefix("data:").trim()
+                                if (data == "[DONE]") {
+                                    completeOnce()
+                                    break
+                                }
+                                val chunk = runCatching { json.decodeFromString<ChatCompletionChunk>(data) }
+                                    .getOrNull() ?: continue
+                                chunk.usage?.let { usage ->
+                                    trySend(GenerationEvent.Usage(usage.promptTokens ?: 0, usage.completionTokens ?: 0))
+                                }
+                                val choice = chunk.choices.firstOrNull() ?: continue
+                                val delta = choice.delta
+                                delta.content?.takeIf { it.isNotEmpty() }?.let {
+                                    trySend(GenerationEvent.TextDelta(it))
+                                }
+                                for (toolCall in delta.toolCalls.orEmpty()) {
+                                    val index = toolCall.index ?: 0
+                                    val functionName = toolCall.function?.name
+                                    val effectiveId = toolCall.id
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.also { toolIdsByIndex[index] = it }
+                                        ?: toolIdsByIndex[index]
+                                        ?: "openai-tool-$index".also { toolIdsByIndex[index] = it }
+                                    if (index !in startedToolIndices && !functionName.isNullOrBlank()) {
+                                        startedToolIndices += index
+                                        trySend(GenerationEvent.ToolCallStarted(effectiveId, functionName))
+                                    }
+                                    toolCall.function?.arguments?.takeIf { it.isNotEmpty() }?.let { args ->
+                                        trySend(GenerationEvent.ToolCallArgumentsDelta(effectiveId, args))
+                                    }
+                                }
+                                if (choice.finishReason != null) completeOnce()
+                            }
+                        }
+                        if (!call.isCanceled()) completeOnce()
+                    } catch (error: Exception) {
+                        if (!call.isCanceled()) {
+                            trySend(GenerationEvent.GenerationFailed(mapError(error)))
+                        }
+                    } finally {
+                        close()
                     }
                 }
             }
-        } catch (e: Exception) {
-            trySend(GenerationEvent.GenerationFailed(mapError(e)))
-        } finally {
-            response.close()
-        }
-        awaitClose { response.close() }
+        })
+        awaitClose { call.cancel() }
     }
 
-    private fun buildPayload(request: GenerationRequest): String {
-        val messages = request.messages.map { mapOf("role" to it.role.name.lowercase(), "content" to it.content) }
-        val tools = request.tools.takeIf { it.isNotEmpty() }?.map {
-            mapOf(
-                "type" to "function",
-                "function" to mapOf(
-                    "name" to it.id,
-                    "description" to it.description,
-                    "parameters" to json.decodeFromString<Map<String, Any>>(it.inputSchema.ifBlank { """{"type":"object","properties":{}}""" }),
-                ),
-            )
-        }
-        val body = mutableMapOf<String, Any>(
-            "model" to request.modelId.ifEmpty { defaultModel },
-            "messages" to messages,
-            "temperature" to request.temperature,
-            "stream" to true,
-        )
-        request.maxTokens?.let { body["max_tokens"] = it }
-        if (!tools.isNullOrEmpty()) body["tools"] = tools
-        return buildManualJson(body)
-    }
-
-    private fun buildManualJson(body: Map<String, Any>): String = buildString {
-        append('{')
-        body.entries.forEachIndexed { idx, (k, v) ->
-            if (idx > 0) append(',')
-            append('"').append(k).append("\":").append(jsonValue(v))
-        }
-        append('}')
-    }
-
-    private fun jsonValue(v: Any): String = when (v) {
-        is String -> "\"${v.replace("\"", "\\\"")}\""
-        is Boolean -> v.toString()
-        is Number -> v.toString()
-        is List<*> -> v.joinToString(",", "[", "]") { jsonValue(it!!) }
-        is Map<*, *> -> buildString {
-            append('{')
-            v.entries.forEachIndexed { idx, (k, w) ->
-                if (idx > 0) append(',')
-                append('"').append(k).append("\":").append(jsonValue(w!!))
+    private fun buildPayload(request: GenerationRequest): String = buildJsonObject {
+        put("model", request.modelId.ifEmpty { defaultModel })
+        put("messages", buildJsonArray {
+            request.messages.forEach { message ->
+                add(buildJsonObject {
+                    when {
+                        message.role == MessageRole.TOOL && !message.toolCallId.isNullOrBlank() -> {
+                            put("role", "tool")
+                            put("tool_call_id", message.toolCallId)
+                            put("content", message.content)
+                        }
+                        message.role == MessageRole.ASSISTANT && message.toolCalls.isNotEmpty() -> {
+                            put("role", "assistant")
+                            put("content", message.content)
+                            put("tool_calls", buildJsonArray {
+                                message.toolCalls.forEach { call ->
+                                    add(buildJsonObject {
+                                        put("id", call.id)
+                                        put("type", "function")
+                                        put("function", buildJsonObject {
+                                            put("name", call.name)
+                                            put("arguments", call.arguments)
+                                        })
+                                    })
+                                }
+                            })
+                        }
+                        else -> {
+                            // A legacy TOOL message without a call id cannot be validly
+                            // correlated by OpenAI, so degrade it to user context.
+                            put("role", if (message.role == MessageRole.TOOL) "user" else message.role.name.lowercase())
+                            put("content", message.content)
+                        }
+                    }
+                })
             }
-            append('}')
+        })
+        put("temperature", JsonPrimitive(request.temperature))
+        put("stream", true)
+        // OpenAI only returns aggregate usage for streamed chat completions when
+        // stream_options.include_usage is requested.
+        put("stream_options", buildJsonObject { put("include_usage", true) })
+        request.maxTokens?.let { put("max_tokens", it) }
+        if (request.tools.isNotEmpty()) {
+            put("tools", buildJsonArray {
+                request.tools.forEach { tool ->
+                    add(buildJsonObject {
+                        put("type", "function")
+                        put("function", buildJsonObject {
+                            put("name", tool.id)
+                            put("description", tool.description)
+                            put("parameters", parseToolSchema(tool.inputSchema))
+                        })
+                    })
+                }
+            })
         }
-        else -> "\"$v\""
+    }.toString()
+
+    private fun parseToolSchema(raw: String): JsonElement = runCatching {
+        json.parseToJsonElement(raw.ifBlank { DEFAULT_TOOL_SCHEMA })
+    }.getOrElse {
+        json.parseToJsonElement(DEFAULT_TOOL_SCHEMA)
     }
 
     private fun mapCapabilities(modelId: String): ModelCapabilities = ModelCapabilities(
@@ -227,6 +289,7 @@ class OpenAiProvider(
 
     companion object {
         const val DEFAULT_BASE_URL = "https://api.openai.com/v1"
+        private const val DEFAULT_TOOL_SCHEMA = "{\"type\":\"object\",\"properties\":{}}"
     }
 }
 
@@ -245,17 +308,18 @@ private data class ChatCompletionChunk(
 @Serializable
 private data class ChunkChoice(
     val delta: ChunkDelta = ChunkDelta(),
-    val finishReason: String? = null,
+    @SerialName("finish_reason") val finishReason: String? = null,
 )
 
 @Serializable
 private data class ChunkDelta(
     val content: String? = null,
-    val toolCalls: List<ChunkToolCall>? = null,
+    @SerialName("tool_calls") val toolCalls: List<ChunkToolCall>? = null,
 )
 
 @Serializable
 private data class ChunkToolCall(
+    val index: Int? = null,
     val id: String? = null,
     val function: ChunkFunction? = null,
 )
@@ -268,6 +332,6 @@ private data class ChunkFunction(
 
 @Serializable
 private data class ChunkUsage(
-    val promptTokens: Int? = null,
-    val completionTokens: Int? = null,
+    @SerialName("prompt_tokens") val promptTokens: Int? = null,
+    @SerialName("completion_tokens") val completionTokens: Int? = null,
 )

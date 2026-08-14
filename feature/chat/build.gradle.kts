@@ -41,10 +41,4 @@ android {
     implementation(project(":core:tools"))
     implementation(project(":feature:providers"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

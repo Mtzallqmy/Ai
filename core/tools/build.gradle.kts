@@ -25,19 +25,13 @@ android {
 }
 
 dependencies {
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.kotlinx.coroutines.test)
     implementation(libs.kotlinx.serialization.json)
     implementation(project(":core:capabilities"))
     implementation(project(":core:common"))
     implementation(project(":core:model"))
     implementation(project(":core:security"))
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

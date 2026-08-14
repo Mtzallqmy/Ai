@@ -24,19 +24,14 @@ android {
 }
 
 dependencies {
-    implementation(libs.junit)
+    testImplementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.squareup.okhttp.mockwebserver)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.squareup.okhttp)
     implementation(project(":core:common"))
     implementation(project(":core:model"))
     implementation(project(":core:network"))
-
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
 
 }

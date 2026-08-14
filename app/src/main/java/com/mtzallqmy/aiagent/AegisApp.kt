@@ -3,7 +3,6 @@ package com.mtzallqmy.aiagent
 import android.app.Application
 import com.mtzallqmy.aiagent.agent.AgentRuntime
 import com.mtzallqmy.aiagent.agent.ContextManager
-import com.mtzallqmy.aiagent.agent.GraphAgentEngine
 import com.mtzallqmy.aiagent.agent.HeartbeatAgent
 import com.mtzallqmy.aiagent.agent.MemoryStoreSubAgentMemoryGateway
 import com.mtzallqmy.aiagent.agent.ProviderRegistry
@@ -122,8 +121,6 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
     lateinit var ragRuntime: RagRuntime
         private set
     lateinit var codingBackend: CodingBackend
-        private set
-    lateinit var graphAgentEngine: GraphAgentEngine<Any>
         private set
 
     override fun onCreate() {
@@ -252,16 +249,6 @@ class AegisApp : Application(), ScheduleRuntimeOwner, ScheduleExecutionHost {
         deviceBackendRegistry.register(com.mtzallqmy.aiagent.tool.android.AdbDeviceBackend())
 
         codingBackend = com.mtzallqmy.aiagent.tool.terminal.LocalSandboxCoding()
-
-        // Minimal proof-of-concept graph: plan -> execute -> review with interrupt at review
-        graphAgentEngine = GraphAgentEngine(entryNode = "plan") { nodeId, state ->
-            when (nodeId) {
-                "plan" -> GraphAgentEngine.GraphNextStep.Goto("execute", state)
-                "execute" -> GraphAgentEngine.GraphNextStep.Goto("review", state)
-                else -> GraphAgentEngine.GraphNextStep.End(state)
-            }
-        }
-        graphAgentEngine.interruptBefore = setOf("review")
 
         workflowEngine = WorkflowEngine(
             store = AtomicFileWorkflowStore(File(noBackupFilesDir, "workflows/state.json")),

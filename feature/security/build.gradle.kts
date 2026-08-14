@@ -38,10 +38,4 @@ android {
     implementation(project(":feature:sandbox"))
     implementation(project(":core:permissions"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

@@ -38,10 +38,4 @@ android {
     implementation(libs.kotlinx.serialization.json)
     implementation(project(":tool:terminal"))
 
-android {
-    publishing {
-        singleVariant("debug")
-    }
-}
-
 }

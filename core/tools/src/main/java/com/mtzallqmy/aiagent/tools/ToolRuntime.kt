@@ -2,6 +2,7 @@ package com.mtzallqmy.aiagent.tools
 
 import com.mtzallqmy.aiagent.capabilities.CapabilityRegistry
 import com.mtzallqmy.aiagent.common.AgentException
+import com.mtzallqmy.aiagent.common.SecretSanitizer
 import com.mtzallqmy.aiagent.model.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.SerializationException
@@ -74,6 +75,9 @@ class ToolRuntime(
         maxRetries: Int = 1,
         onStateChange: (ToolRuntimeState) -> Unit = {},
     ): ToolResultEnvelope {
+        require(maxToolCallsPerRun > 0) { "maxToolCallsPerRun must be positive" }
+        require(maxRetries >= 0) { "maxRetries must not be negative" }
+
         // 0. Schema validation: LLM arguments -> JSON parser -> schema validator -> typed input
         val typedInput = when (input) {
             is kotlinx.serialization.json.JsonObject -> input
@@ -152,7 +156,7 @@ class ToolRuntime(
             toolId = tool.descriptor.id,
             action = "execute",
             target = tool.descriptor.id,
-            argumentsSummary = typedInput.toString().take(200),
+            argumentsSummary = SecretSanitizer.sanitize(typedInput.toString()).take(200),
             riskLevel = tool.descriptor.riskLevel,
             requestingAgent = agentId,
             agentScope = agentId,
@@ -193,6 +197,8 @@ class ToolRuntime(
 
         // 6. Timed execution with cancellation + retries
         onStateChange(ToolRuntimeState.EXECUTING)
+        val automaticRetryAllowed = tool.descriptor.riskLevel == RiskLevel.SAFE ||
+            tool.descriptor.riskLevel == RiskLevel.READ
         var attempt = 0
         while (true) {
             attempt++
@@ -205,19 +211,32 @@ class ToolRuntime(
                         metadata = mapOf("attempts" to attempt.toString(), "toolVersion" to tool.descriptor.id),
                     )
                 }
+            } catch (e: TimeoutCancellationException) {
+                // A timed-out modifying action has an unknown completion state. Never
+                // replay it automatically; that could duplicate a side effect.
+                failure(
+                    tool,
+                    "Timeout",
+                    ToolErrorCategory.TIMEOUT,
+                    durationMs = tool.descriptor.timeoutMs,
+                    isRetryable = automaticRetryAllowed,
+                )
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: TimeoutCancellationException) {
-                failure(tool, "Timeout", ToolErrorCategory.TIMEOUT, durationMs = tool.descriptor.timeoutMs)
             } catch (e: AgentException.ToolCancelledError) {
                 failure(tool, e.message ?: "Cancelled", ToolErrorCategory.CANCELLED,
                     durationMs = System.currentTimeMillis() - start, isRetryable = false)
             } catch (e: Throwable) {
-                failure(tool, e.message ?: "Unknown error", ToolErrorCategory.GENERIC,
-                    durationMs = System.currentTimeMillis() - start)
+                failure(
+                    tool,
+                    e.message ?: "Unknown error",
+                    ToolErrorCategory.GENERIC,
+                    durationMs = System.currentTimeMillis() - start,
+                    isRetryable = automaticRetryAllowed,
+                )
             }
 
-            if (result.success || !result.isRetryable || attempt > maxRetries + 1) return result
+            if (result.success || !result.isRetryable || attempt >= maxRetries + 1) return result
             // Exponential backoff: 500ms, 1s, ...
             delay(500L * (1 shl (attempt - 1)))
         }
@@ -227,7 +246,12 @@ class ToolRuntime(
         tool: RegisteredTool, error: String, category: ToolErrorCategory,
         durationMs: Long = 0L, isRetryable: Boolean = true,
     ): ToolResultEnvelope = ToolResultEnvelope(
-        toolId = tool.descriptor.id, success = false, data = "", error = error,
-        durationMs = durationMs, isRetryable = isRetryable, errorCategory = category,
+        toolId = tool.descriptor.id,
+        success = false,
+        data = "",
+        error = SecretSanitizer.sanitize(error),
+        durationMs = durationMs,
+        isRetryable = isRetryable,
+        errorCategory = category,
     )
 }

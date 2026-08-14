@@ -61,28 +61,34 @@ class AppWorkflowActionExecutor(
         }
         val runtime = AgentRuntime(provider, toolRuntime)
         val output = StringBuilder()
+        var finalOutput: String? = null
         var failure: String? = null
         val eventCollector = launch(start = CoroutineStart.UNDISPATCHED) {
             runtime.events.collect { event ->
                 when (event) {
                     is GenerationEvent.TextDelta -> output.append(event.text)
+                    is GenerationEvent.GenerationCompleted -> {
+                        if (event.finalText.isNotBlank()) finalOutput = event.finalText
+                    }
                     is GenerationEvent.GenerationFailed -> failure = event.error.message
                     else -> Unit
                 }
             }
         }
-        runtime.runTask(
-            task = node.prompt,
-            modelId = node.modelId.orEmpty(),
-            agentId = node.agentId,
-            tools = allowedTools,
-        )
+        check(
+            runtime.runTask(
+                task = node.prompt,
+                modelId = node.modelId.orEmpty(),
+                agentId = node.agentId,
+                tools = allowedTools,
+            ) != null,
+        ) { "Workflow Agent runtime refused to start" }
         val finalState = runtime.state.filter { it in TERMINAL_AGENT_STATES }.first()
         eventCollector.cancelAndJoin()
         if (finalState != AgentState.COMPLETED) {
             error(failure ?: "Workflow agent ended in $finalState")
         }
-        JsonObject(mapOf("text" to JsonPrimitive(output.toString())))
+        JsonObject(mapOf("text" to JsonPrimitive(output.toString().ifBlank { finalOutput.orEmpty() })))
     }
 
     private suspend fun executeTool(node: ToolNode, context: WorkflowExecutionContext): JsonObject {

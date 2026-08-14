@@ -1,5 +1,6 @@
 package com.mtzallqmy.aiagent.feature.browser
 
+import android.os.Build
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.Context
@@ -172,7 +173,9 @@ class WebViewEngine(
                 threatType: Int,
                 callback: SafeBrowsingResponse?,
             ) {
-                callback?.backToSafety(false)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    callback?.backToSafety(false)
+                }
                 failNavigation(SecurityException("Safe Browsing blocked a malicious page"))
             }
         }
